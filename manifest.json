@@ -1,0 +1,34 @@
+{
+  "manifest_version": 3,
+  "name": "Encord Camera Layout",
+  "version": "0.6.0",
+  "description": "Save and restore Encord Label Editor camera tiles and mosaic positions.",
+  "permissions": ["storage", "activeTab", "scripting"],
+  "host_permissions": [
+    "https://app.encord.com/*",
+    "https://app.us.encord.com/*"
+  ],
+  "action": {
+    "default_title": "Encord Camera Layout",
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://app.encord.com/*",
+        "https://app.us.encord.com/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["page-world.js"],
+      "matches": [
+        "https://app.encord.com/*",
+        "https://app.us.encord.com/*"
+      ]
+    }
+  ]
+}

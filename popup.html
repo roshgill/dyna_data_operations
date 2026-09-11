@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Encord Camera Layout</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main>
+      <h1>Camera layout</h1>
+      <p class="hint">v0.6 — React MAIN apply + drag fallback</p>
+
+      <div class="actions">
+        <button id="scan" type="button">Scan page</button>
+        <button id="save" type="button">Save cameras shown</button>
+        <button id="restore" type="button" class="primary">Restore cameras</button>
+        <button id="copy" type="button" hidden>Copy scan result</button>
+      </div>
+
+      <p id="status" class="status" aria-live="polite"></p>
+      <pre id="preview" class="preview" hidden></pre>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>
