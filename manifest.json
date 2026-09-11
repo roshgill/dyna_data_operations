@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Encord Camera Layout",
-  "version": "0.8.0",
-  "description": "Click the icon to restore your Encord mosaic layout. Right-click for Save and details.",
+  "version": "0.8.1",
+  "description": "Click the icon to restore your Encord mosaic layout and select cam_high. Right-click for Save and details.",
   "permissions": ["storage", "activeTab", "scripting", "contextMenus"],
   "host_permissions": [
     "https://app.encord.com/*",

@@ -1,7 +1,8 @@
 (() => {
-  const VERSION = "0.8.0";
+  const VERSION = "0.8.1";
   const STORAGE_KEY = "preferredCameras";
   const LAYOUT_KEY = "preferredMosaicLayout";
+  const PREFERRED_ACTIVE_TILE = "cam_high";
 
   if (window.__encordCameraLayoutHandler) {
     try {
@@ -547,11 +548,19 @@
       message = "No saved mosaic tree. Arrange panes (shrink ghost to the right), then Save.";
     }
 
+    // After layout settle, focus cam_high so annotating can start immediately.
+    await new Promise((r) => setTimeout(r, 150));
+    const selectResult = await selectTile(PREFERRED_ACTIVE_TILE);
+    if (selectResult.ok) {
+      message += ` · selected ${selectResult.tileId}`;
+    }
+
     return {
       ok: true,
       storageRestored,
       reactRestore,
       dragRestore,
+      selectResult,
       cameras: after,
       mosaicAfter,
       savedTree: savedMosaic?.tree || null,
@@ -594,11 +603,98 @@
     }, 3200);
   }
 
+  function clickEl(el) {
+    if (!el) return false;
+    const opts = { bubbles: true, cancelable: true, view: window };
+    el.dispatchEvent(new PointerEvent("pointerdown", { ...opts, pointerId: 1, buttons: 1 }));
+    el.dispatchEvent(new MouseEvent("mousedown", { ...opts, buttons: 1 }));
+    el.dispatchEvent(new PointerEvent("pointerup", { ...opts, pointerId: 1, buttons: 0 }));
+    el.dispatchEvent(new MouseEvent("mouseup", { ...opts, buttons: 0 }));
+    el.dispatchEvent(new MouseEvent("click", opts));
+    if (typeof el.focus === "function") {
+      try {
+        el.focus({ preventScroll: true });
+      } catch {
+        el.focus();
+      }
+    }
+    return true;
+  }
+
+  function findTileWindow(tileId) {
+    const id = String(tileId);
+
+    // Prefer labeled mosaic tiles (real streams).
+    for (const nameEl of document.querySelectorAll('[data-testid="tile-display-name"]')) {
+      if (normalizeLabel(nameEl.textContent) === id) {
+        return mosaicWindowFor(nameEl) || nameEl.closest(".mosaic-window") || nameEl;
+      }
+    }
+
+    const byTag = document.querySelector(`[data-tile-id-tag="${CSS.escape(id)}"]`);
+    if (byTag) return mosaicWindowFor(byTag) || byTag.closest(".mosaic-window") || byTag;
+
+    const byToolbar = document.querySelector(`[data-testid="main-toolbar-${CSS.escape(id)}"]`);
+    if (byToolbar) {
+      return mosaicWindowFor(byToolbar) || byToolbar.closest(".mosaic-window") || byToolbar;
+    }
+
+    // Match video/source URLs that contain the camera id path segment.
+    const media = [
+      ...document.querySelectorAll("video, source, [src], [data-src]"),
+    ];
+    for (const el of media) {
+      const src = el.getAttribute("src") || el.getAttribute("data-src") || "";
+      if (!src) continue;
+      if (
+        src.includes(`/${id}/`) ||
+        src.includes(`cam_${id}`) ||
+        new RegExp(`(^|/)${id}(/|_|\\.|$)`).test(src)
+      ) {
+        return mosaicWindowFor(el) || el.closest(".mosaic-window") || el;
+      }
+    }
+
+    return null;
+  }
+
+  function pickClickTarget(win) {
+    if (!win) return null;
+    return (
+      win.querySelector('[data-testid="editor-content"]') ||
+      win.querySelector("video") ||
+      win.querySelector("canvas") ||
+      win.querySelector(".mosaic-window-body") ||
+      win.querySelector(".mosaic-window-toolbar") ||
+      win
+    );
+  }
+
+  async function selectTile(tileId = PREFERRED_ACTIVE_TILE, attempts = 6) {
+    const id = tileId || PREFERRED_ACTIVE_TILE;
+    for (let i = 0; i < attempts; i += 1) {
+      const win = findTileWindow(id);
+      const target = pickClickTarget(win);
+      if (target && isVisible(target)) {
+        clickEl(target);
+        // Second click after a tick helps if the first only focuses the mosaic chrome.
+        await new Promise((r) => setTimeout(r, 40));
+        clickEl(target);
+        return { ok: true, tileId: id, attempt: i + 1 };
+      }
+      await new Promise((r) => setTimeout(r, 120));
+    }
+    return { ok: false, tileId: id, error: `Tile not found: ${id}` };
+  }
+
   async function handleMessage(message) {
     if (message?.type === "PING") return { ok: true, version: VERSION };
     if (message?.type === "SHOW_TOAST") {
       showToast(message.message || "", message.kind || "info");
       return { ok: true };
+    }
+    if (message?.type === "SELECT_TILE") {
+      return selectTile(message.tileId || PREFERRED_ACTIVE_TILE);
     }
     if (message?.type === "SCAN_PAGE") return scanPage(message.pageWorld);
     if (message?.type === "SAVE_CAMERAS") return saveCameras(message.pageWorld);
