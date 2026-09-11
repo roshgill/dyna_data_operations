@@ -9,7 +9,10 @@
   <body>
     <main>
       <h1>Camera layout</h1>
-      <p class="hint">v0.7.1 — saved cams win; ghosts stay minimized</p>
+      <p class="hint">
+        v0.8 — toolbar icon click restores. Right-click icon for Save / Scan. This panel is for
+        details.
+      </p>
 
       <div class="actions">
         <button id="scan" type="button">Scan page</button>
@@ -21,6 +24,7 @@
       <p id="status" class="status" aria-live="polite"></p>
       <pre id="preview" class="preview" hidden></pre>
     </main>
+    <script src="layout-ops.js"></script>
     <script src="popup.js"></script>
   </body>
 </html>

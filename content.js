@@ -1,5 +1,5 @@
 (() => {
-  const VERSION = "0.7.1";
+  const VERSION = "0.8.0";
   const STORAGE_KEY = "preferredCameras";
   const LAYOUT_KEY = "preferredMosaicLayout";
 
@@ -559,8 +559,47 @@
     };
   }
 
+  function showToast(message, kind = "info") {
+    const existing = document.getElementById("encord-camera-layout-toast");
+    if (existing) existing.remove();
+
+    const el = document.createElement("div");
+    el.id = "encord-camera-layout-toast";
+    el.textContent = message;
+    const bg =
+      kind === "ok" ? "#1f6b3a" : kind === "error" ? "#8b1e1e" : kind === "warn" ? "#7a4b00" : "#2b2b2b";
+    Object.assign(el.style, {
+      position: "fixed",
+      right: "16px",
+      bottom: "16px",
+      zIndex: "2147483647",
+      maxWidth: "420px",
+      padding: "10px 14px",
+      borderRadius: "10px",
+      background: bg,
+      color: "#fff",
+      font: "13px/1.35 system-ui, -apple-system, sans-serif",
+      boxShadow: "0 8px 24px rgba(0,0,0,.35)",
+      opacity: "0",
+      transition: "opacity .15s ease",
+      pointerEvents: "none",
+    });
+    document.documentElement.appendChild(el);
+    requestAnimationFrame(() => {
+      el.style.opacity = "1";
+    });
+    setTimeout(() => {
+      el.style.opacity = "0";
+      setTimeout(() => el.remove(), 200);
+    }, 3200);
+  }
+
   async function handleMessage(message) {
     if (message?.type === "PING") return { ok: true, version: VERSION };
+    if (message?.type === "SHOW_TOAST") {
+      showToast(message.message || "", message.kind || "info");
+      return { ok: true };
+    }
     if (message?.type === "SCAN_PAGE") return scanPage(message.pageWorld);
     if (message?.type === "SAVE_CAMERAS") return saveCameras(message.pageWorld);
     if (message?.type === "RESTORE_CAMERAS") return restoreCameras(message.pageWorldApplyResult);

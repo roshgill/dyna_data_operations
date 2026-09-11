@@ -1,0 +1,109 @@
+importScripts("layout-ops.js");
+
+const MENU = {
+  SAVE: "encord-layout-save",
+  SCAN: "encord-layout-scan",
+  DETAILS: "encord-layout-details",
+  RESTORE: "encord-layout-restore",
+};
+
+function installContextMenus() {
+  chrome.contextMenus.removeAll(() => {
+    chrome.contextMenus.create({
+      id: MENU.RESTORE,
+      title: "Restore layout",
+      contexts: ["action"],
+    });
+    chrome.contextMenus.create({
+      id: MENU.SAVE,
+      title: "Save layout",
+      contexts: ["action"],
+    });
+    chrome.contextMenus.create({
+      id: MENU.SCAN,
+      title: "Scan page",
+      contexts: ["action"],
+    });
+    chrome.contextMenus.create({
+      id: MENU.DETAILS,
+      title: "Open details…",
+      contexts: ["action"],
+    });
+  });
+}
+
+async function withErrorToast(tab, fn) {
+  try {
+    return await fn();
+  } catch (err) {
+    const message = err?.message || String(err);
+    if (tab?.id) {
+      await LayoutOps.toast(tab.id, message, "error");
+    }
+    await LayoutOps.setBadge("!", "#b42318");
+    await chrome.storage.local.set({
+      lastAction: { type: "error", message, at: Date.now() },
+    });
+    console.warn("[Encord Camera Layout]", message);
+    return { ok: false, error: message };
+  }
+}
+
+chrome.runtime.onInstalled.addListener(() => {
+  installContextMenus();
+  chrome.action.setTitle({
+    title: "Encord Camera Layout — click to restore · right-click for Save / details",
+  });
+});
+
+chrome.runtime.onStartup.addListener(() => {
+  installContextMenus();
+});
+
+// Primary path: one click restores.
+chrome.action.onClicked.addListener((tab) => {
+  withErrorToast(tab, () => LayoutOps.restore(tab));
+});
+
+chrome.contextMenus.onClicked.addListener(async (info, tab) => {
+  if (info.menuItemId === MENU.RESTORE) {
+    await withErrorToast(tab, () => LayoutOps.restore(tab));
+    return;
+  }
+  if (info.menuItemId === MENU.SAVE) {
+    await withErrorToast(tab, () => LayoutOps.save(tab));
+    return;
+  }
+  if (info.menuItemId === MENU.SCAN) {
+    await withErrorToast(tab, () => LayoutOps.scan(tab));
+    return;
+  }
+  if (info.menuItemId === MENU.DETAILS) {
+    await chrome.windows.create({
+      url: chrome.runtime.getURL("popup.html"),
+      type: "popup",
+      width: 360,
+      height: 460,
+      focused: true,
+    });
+  }
+});
+
+// Popup / other pages can request the same ops.
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  (async () => {
+    if (message?.type === "OPS_RESTORE") return LayoutOps.restore(message.tab);
+    if (message?.type === "OPS_SAVE") return LayoutOps.save(message.tab);
+    if (message?.type === "OPS_SCAN") return LayoutOps.scan(message.tab);
+    return { ok: false, error: "Unknown background op." };
+  })()
+    .then(sendResponse)
+    .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
+  return true;
+});
+
+// Ensure menus exist after extension reload / SW wake.
+installContextMenus();
+chrome.action.setTitle({
+  title: "Encord Camera Layout — click to restore · right-click for Save / details",
+});

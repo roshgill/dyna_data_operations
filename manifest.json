@@ -1,16 +1,18 @@
 {
   "manifest_version": 3,
   "name": "Encord Camera Layout",
-  "version": "0.7.1",
-  "description": "Save and restore Encord mosaic layouts, including minimized ghost panes (5 vs 6).",
-  "permissions": ["storage", "activeTab", "scripting"],
+  "version": "0.8.0",
+  "description": "Click the icon to restore your Encord mosaic layout. Right-click for Save and details.",
+  "permissions": ["storage", "activeTab", "scripting", "contextMenus"],
   "host_permissions": [
     "https://app.encord.com/*",
     "https://app.us.encord.com/*"
   ],
+  "background": {
+    "service_worker": "background.js"
+  },
   "action": {
-    "default_title": "Encord Camera Layout",
-    "default_popup": "popup.html"
+    "default_title": "Encord Camera Layout — click to restore · right-click for Save / details"
   },
   "content_scripts": [
     {
