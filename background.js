@@ -2,7 +2,6 @@ importScripts("layout-ops.js");
 
 const MENU = {
   SAVE: "encord-layout-save",
-  SCAN: "encord-layout-scan",
   DETAILS: "encord-layout-details",
   RESTORE: "encord-layout-restore",
 };
@@ -17,11 +16,6 @@ function installContextMenus() {
     chrome.contextMenus.create({
       id: MENU.SAVE,
       title: "Save layout",
-      contexts: ["action"],
-    });
-    chrome.contextMenus.create({
-      id: MENU.SCAN,
-      title: "Scan page",
       contexts: ["action"],
     });
     chrome.contextMenus.create({
@@ -74,10 +68,6 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     await withErrorToast(tab, () => LayoutOps.save(tab));
     return;
   }
-  if (info.menuItemId === MENU.SCAN) {
-    await withErrorToast(tab, () => LayoutOps.scan(tab));
-    return;
-  }
   if (info.menuItemId === MENU.DETAILS) {
     await chrome.windows.create({
       url: chrome.runtime.getURL("popup.html"),
@@ -94,7 +84,6 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   (async () => {
     if (message?.type === "OPS_RESTORE") return LayoutOps.restore(message.tab);
     if (message?.type === "OPS_SAVE") return LayoutOps.save(message.tab);
-    if (message?.type === "OPS_SCAN") return LayoutOps.scan(message.tab);
     return { ok: false, error: "Unknown background op." };
   })()
     .then(sendResponse)

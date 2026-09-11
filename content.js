@@ -1,5 +1,5 @@
 (() => {
-  const VERSION = "0.8.1";
+  const VERSION = "0.8.2";
   const STORAGE_KEY = "preferredCameras";
   const LAYOUT_KEY = "preferredMosaicLayout";
   const PREFERRED_ACTIVE_TILE = "cam_high";
@@ -420,34 +420,10 @@
     return true;
   }
 
-  function scanPage(pageWorld) {
-    const tiles = discoverVisibleTiles();
-    const domMosaic = captureMosaicLayoutFromDom();
-    const mosaic =
-      pageWorld?.ok && pageWorld.tree
-        ? { ...pageWorld, domFallback: domMosaic }
-        : {
-            ...domMosaic,
-            reactFindings: pageWorld?.reactFindings || [],
-            hasOnChange: !!pageWorld?.hasOnChange,
-            pageWorldError: pageWorld?.error,
-          };
-
-    return {
-      ok: true,
-      version: VERSION,
-      url: location.href,
-      visibleTiles: serializeCameras(tiles),
-      mosaic,
-      layoutStorage: readLayoutStorage(),
-      pageWorld,
-    };
-  }
-
   async function saveCameras(pageWorld) {
     const cameras = discoverVisibleTiles();
     if (!cameras.length && !(pageWorld?.leaves?.length)) {
-      return { ok: false, error: "No mosaic camera tiles found.", scan: scanPage(pageWorld) };
+      return { ok: false, error: "No mosaic camera tiles found." };
     }
 
     const domMosaic = captureMosaicLayoutFromDom();
@@ -696,7 +672,6 @@
     if (message?.type === "SELECT_TILE") {
       return selectTile(message.tileId || PREFERRED_ACTIVE_TILE);
     }
-    if (message?.type === "SCAN_PAGE") return scanPage(message.pageWorld);
     if (message?.type === "SAVE_CAMERAS") return saveCameras(message.pageWorld);
     if (message?.type === "RESTORE_CAMERAS") return restoreCameras(message.pageWorldApplyResult);
     if (message?.type === "GET_SAVED_LAYOUT") {

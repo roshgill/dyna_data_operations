@@ -156,26 +156,6 @@ const LayoutOps = (() => {
     return result;
   }
 
-  async function scan(tab) {
-    const active = await requireEncordTab(tab);
-    const pageWorld = await runPageWorld(active.id, "capture");
-    const result = await chrome.tabs.sendMessage(active.id, {
-      type: "SCAN_PAGE",
-      pageWorld,
-    });
-    if (!result?.ok && result?.error) throw new Error(result.error);
-
-    const message = `Scan done — mosaic=${result.mosaic?.source}, leaves=${
-      (result.mosaic?.leaves || []).length
-    }`;
-    await toast(active.id, message, "info");
-    await setBadge("SCN", "#5b3cc4");
-    await chrome.storage.local.set({
-      lastAction: { type: "scan", message, at: Date.now(), scan: result },
-    });
-    return result;
-  }
-
   return {
     isEncordUrl,
     getActiveTab,
@@ -183,7 +163,6 @@ const LayoutOps = (() => {
     runPageWorld,
     restore,
     save,
-    scan,
     toast,
     setBadge,
   };
