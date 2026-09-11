@@ -1,5 +1,5 @@
 (() => {
-  const VERSION = "0.6.0";
+  const VERSION = "0.7.1";
   const STORAGE_KEY = "preferredCameras";
   const LAYOUT_KEY = "preferredMosaicLayout";
 
@@ -445,14 +445,21 @@
 
   async function saveCameras(pageWorld) {
     const cameras = discoverVisibleTiles();
-    if (!cameras.length) {
+    if (!cameras.length && !(pageWorld?.leaves?.length)) {
       return { ok: false, error: "No mosaic camera tiles found.", scan: scanPage(pageWorld) };
     }
 
     const domMosaic = captureMosaicLayoutFromDom();
+    // Prefer React tree (includes ghost panes like cam_high that have no tile-display-name).
     const mosaic =
       pageWorld?.ok && pageWorld.tree
-        ? { ...pageWorld, spatial: domMosaic }
+        ? {
+            ...pageWorld,
+            spatial: domMosaic,
+            ghostLeaves: (pageWorld.leaves || []).filter(
+              (id) => !cameras.some((c) => c.id === id)
+            ),
+          }
         : { ...domMosaic, reactFindings: pageWorld?.reactFindings || [] };
 
     const payload = serializeCameras(cameras);
@@ -466,11 +473,14 @@
       savedUrl: location.href,
     });
 
+    const ghosts = mosaic.ghostLeaves || [];
     return {
       ok: true,
       cameras: payload,
       mosaic,
-      message: `Saved ${payload.length} camera(s) + mosaic (${mosaic.source}).`,
+      message: `Saved layout (${mosaic.source}): ${
+        mosaic.leaves?.join(", ") || payload.map((c) => c.id).join(", ")
+      }${ghosts.length ? ` [ghost/minimized: ${ghosts.join(", ")}]` : ""}.`,
     };
   }
 
@@ -480,23 +490,8 @@
       LAYOUT_KEY,
       "preferredLayoutStorage",
     ]);
-    const preferred = stored[STORAGE_KEY];
-    if (!preferred?.length) {
-      return { ok: false, error: "Nothing saved yet." };
-    }
-
-    const wantVisible = new Set(preferred.filter((c) => c.visible).map((c) => c.id));
-    const current = discoverVisibleTiles();
-    const extra = current.filter((c) => !wantVisible.has(c.id));
-
-    let closed = 0;
-    for (const cam of extra) {
-      const closeBtn = findCloseButton(cam);
-      if (!closeBtn) continue;
-      closeBtn.click();
-      closed += 1;
-      await new Promise((r) => setTimeout(r, 80));
-    }
+    const preferred = stored[STORAGE_KEY] || [];
+    const savedMosaic = stored[LAYOUT_KEY];
 
     let storageRestored = false;
     const preferredLayout = stored.preferredLayoutStorage;
@@ -514,45 +509,49 @@
       }
     }
 
-    const savedMosaic = stored[LAYOUT_KEY];
     const reactRestore = pageWorldApplyResult || {
       attempted: false,
       applied: false,
       error: "page-world apply not run",
     };
 
+    // Drag fallback only if React apply failed and we have positional boxes.
     let dragRestore = { attempted: false };
-    if (!reactRestore.applied) {
+    if (!reactRestore.applied && preferred.length) {
       dragRestore = await restoreByDragging(preferred);
       await new Promise((r) => setTimeout(r, 150));
     }
 
     const after = serializeCameras(discoverVisibleTiles());
     const mosaicAfter = captureMosaicLayoutFromDom();
-    const matched = layoutsRoughlyMatch(preferred, after);
 
     let message;
     if (reactRestore.applied) {
-      message = `Restored mosaic via React (${reactRestore.mode || reactRestore.type || "ok"}).`;
-    } else if (dragRestore.attempted && matched) {
-      message = `Restored positions via tile drag (${dragRestore.swapCount} swap(s)).`;
+      const adapt = reactRestore.adaptInfo;
+      const leafNote = reactRestore.leaves?.join(", ") || "";
+      message = `Restored mosaic via React (${reactRestore.mode || "ok"})${
+        reactRestore.adapted ? " with 5/6 adapt" : ""
+      }: ${leafNote}`;
+      if (adapt?.currentLeaves?.length !== adapt?.savedLeaves?.length) {
+        message += ` (saved ${adapt.savedLeaves.length} → now ${adapt.currentLeaves.length})`;
+      }
     } else if (dragRestore.attempted) {
-      message = `Tried drag restore (${dragRestore.swapCount || 0} swap(s)); layout still differs. React: ${
-        reactRestore.error || "n/a"
-      }.`;
+      message = `React apply failed (${reactRestore.error || "n/a"}); drag tried ${
+        dragRestore.swapCount || 0
+      } swap(s).`;
     } else if (savedMosaic?.ok) {
-      message = `Tree saved (${savedMosaic.source}) but apply failed: ${reactRestore.error || "unknown"}.`;
+      message = `Tree saved (${savedMosaic.source}) but apply failed: ${
+        reactRestore.error || "unknown"
+      }.`;
     } else {
-      message = "No saved mosaic tree. Save again on your preferred layout.";
+      message = "No saved mosaic tree. Arrange panes (shrink ghost to the right), then Save.";
     }
 
     return {
       ok: true,
-      closed,
       storageRestored,
       reactRestore,
       dragRestore,
-      matched,
       cameras: after,
       mosaicAfter,
       savedTree: savedMosaic?.tree || null,

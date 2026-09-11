@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Encord Camera Layout",
-  "version": "0.6.0",
-  "description": "Save and restore Encord Label Editor camera tiles and mosaic positions.",
+  "version": "0.7.1",
+  "description": "Save and restore Encord mosaic layouts, including minimized ghost panes (5 vs 6).",
   "permissions": ["storage", "activeTab", "scripting"],
   "host_permissions": [
     "https://app.encord.com/*",

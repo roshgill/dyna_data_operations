@@ -238,42 +238,48 @@ restoreBtn.addEventListener("click", async () => {
       throw new Error("Open an Encord label editor tab first.");
     }
 
-    // Prefer reading saved layout from the content script's storage view
     await ensureContentScript(tab.id);
     const saved = await chrome.tabs.sendMessage(tab.id, { type: "GET_SAVED_LAYOUT" });
     const layout = saved?.mosaic;
 
-    const { preferredCameras } = await chrome.storage.local.get("preferredCameras");
-    if (!preferredCameras?.length) {
-      throw new Error("Nothing saved yet. Arrange cameras, then click Save.");
+    if (!layout?.tree) {
+      throw new Error(
+        "Nothing saved yet. Shrink the extra pane to the right, arrange the rest, then Save."
+      );
     }
 
-    let pageWorldApplyResult = {
-      attempted: false,
-      applied: false,
-      error: "no saved tree",
-    };
-    if (layout?.tree) {
-      pageWorldApplyResult = await runPageWorld(tab.id, "apply", layout.tree);
-      if (pageWorldApplyResult == null) {
-        pageWorldApplyResult = {
-          attempted: true,
-          applied: false,
-          error: "executeScript returned empty",
-        };
-      }
-    }
+    // Adapt saved tree to this episode: keep saved cameras, drop extras user removed,
+    // only auto-attach ghost panes (no tile-display-name) minimized on the right.
+    const visibleLeaves = (
+      await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: () =>
+          [...document.querySelectorAll('[data-testid="tile-display-name"]')]
+            .map((el) => (el.textContent || "").replace(/\s+/g, " ").trim())
+            .filter(Boolean),
+      })
+    )?.[0]?.result || [];
+
+    const pageWorldApplyResult = await runPageWorld(tab.id, "apply", {
+      tree: layout.tree,
+      adapt: true,
+      visibleLeaves,
+    });
 
     const result = await sendToContent("RESTORE_CAMERAS", { pageWorldApplyResult });
     if (!result?.ok) throw new Error(result?.error || "Restore failed.");
     setStatus(
       result.message || "Restore finished.",
-      formatCameras(result.cameras) +
-        (result.mosaicAfter?.tree
-          ? `\n\nafter tree:\n${JSON.stringify(result.mosaicAfter.tree, null, 2)}`
-          : "") +
-        `\n\nreact: ${JSON.stringify(result.reactRestore)}` +
-        `\n\ndrag: ${JSON.stringify(result.dragRestore)}`
+      (result.reactRestore?.tree
+        ? `applied tree:\n${JSON.stringify(result.reactRestore.tree, null, 2)}\n\n`
+        : "") +
+        formatCameras(result.cameras) +
+        `\n\nreact: ${JSON.stringify({
+          applied: result.reactRestore?.applied,
+          adapted: result.reactRestore?.adapted,
+          error: result.reactRestore?.error,
+          adaptInfo: result.reactRestore?.adaptInfo,
+        })}`
     );
   } catch (err) {
     setStatus(err.message || String(err));

@@ -1,7 +1,10 @@
-// Runs in the page's MAIN world (real React fibers / react-dnd).
+// Runs in the page's MAIN world (real React fibers).
 (function () {
-  const VERSION = "0.6.0";
+  const VERSION = "0.7.1";
+  // Always refresh API when version changes.
   if (window.__encordLayoutPage?.version === VERSION) return;
+
+  const MIN_RIGHT_SPLIT = 96; // first pane gets ~96%, ghost on the right ~4%
 
   function getFiberKey(el) {
     return Object.keys(el || {}).find(
@@ -44,23 +47,87 @@
     if ("first" in val && "second" in val) return true;
     if (val.type === "split" && Array.isArray(val.children)) return true;
     if (val.type === "tabs" && Array.isArray(val.tabs)) return true;
-    if (Array.isArray(val) && val.length && looksLikeLayout(val[0])) return true;
     return false;
   }
 
-  function walkState(state, visit, depth = 0) {
+  function walkState(state, visit) {
     let s = state;
     let i = 0;
-    while (s && i < 30 && depth < 5) {
+    while (s && i < 30) {
       visit(s);
-      // useMemo / useRef / useState shapes
-      const m = s.memoizedState;
-      if (m && typeof m === "object" && m !== s && "current" in m && looksLikeLayout(m.current)) {
-        visit({ memoizedState: m.current, queue: null, __fromRef: true });
-      }
       s = s.next;
       i += 1;
     }
+  }
+
+  function clone(v) {
+    return JSON.parse(JSON.stringify(v));
+  }
+
+  function removeLeaf(tree, id) {
+    if (tree == null) return null;
+    if (typeof tree === "string" || typeof tree === "number") {
+      return String(tree) === String(id) ? null : tree;
+    }
+    if (typeof tree !== "object") return tree;
+
+    const first = removeLeaf(tree.first, id);
+    const second = removeLeaf(tree.second, id);
+    if (first == null && second == null) return null;
+    if (first == null) return second;
+    if (second == null) return first;
+    return { ...tree, first, second };
+  }
+
+  /** Put `id` as a thin pane on the far right of the whole mosaic. */
+  function addLeafMinimizedRight(tree, id, splitPercentage = MIN_RIGHT_SPLIT) {
+    if (tree == null) return id;
+    return {
+      direction: "row",
+      first: tree,
+      second: id,
+      splitPercentage,
+    };
+  }
+
+  /**
+   * Fit a saved layout onto the current episode.
+   * - Saved leaves are the source of truth for which real cameras to show.
+   * - Drop saved leaves that aren't in the current React layout at all.
+   * - Only re-attach *ghost* panes (in current layout but not among visible
+   *   tile-display-name cameras) — e.g. cam_high loading strip — minimized right.
+   * - Do NOT re-add real cameras the user removed before Save (waist cams, etc.).
+   */
+  function adaptTree(savedTree, currentLeaves, visibleLeaves = []) {
+    if (savedTree == null) return null;
+    const current = [...new Set((currentLeaves || []).map(String))];
+    const visible = new Set((visibleLeaves || []).map(String));
+    let tree = clone(savedTree);
+
+    for (const leaf of leavesOf(tree)) {
+      if (!current.includes(leaf)) {
+        tree = removeLeaf(tree, leaf);
+      }
+    }
+
+    const have = new Set(leavesOf(tree));
+    for (const leaf of current) {
+      if (have.has(leaf)) continue;
+      // Real, loaded camera tiles the user didn't save → stay omitted (deleted).
+      if (visible.has(leaf)) continue;
+      // Ghost / unloaded mosaic leaf (spinner pane) → keep, minimized on the right.
+      tree = addLeafMinimizedRight(tree, leaf, MIN_RIGHT_SPLIT);
+      have.add(leaf);
+    }
+
+    return tree;
+  }
+
+  function scoreCandidate(layout, applyFn, onChange) {
+    let score = leavesOf(layout).length * 10;
+    if (typeof applyFn === "function") score += 50;
+    if (typeof onChange === "function") score += 30;
+    return score;
   }
 
   function collectFromFiber(fiber, findings, bestRef, startLabel, maxDepth = 100) {
@@ -72,18 +139,12 @@
       const layout =
         (looksLikeLayout(props.layout) && props.layout) ||
         (looksLikeLayout(props.value) && props.value) ||
-        (looksLikeLayout(props.initialValue) && props.initialValue) ||
         null;
 
       const onChange =
         [props.onChange, props.onRelease, props.onLayoutChange, props.setLayout].find(
           (fn) => typeof fn === "function"
         ) || null;
-
-      const mosaicActions =
-        props.mosaicActions ||
-        f.dependencies?.firstContext?.memoizedValue?.mosaicActions ||
-        null;
 
       let stateLayout = null;
       let stateSetter = null;
@@ -99,18 +160,13 @@
         /* ignore */
       }
 
-      // Context values hanging on fiber
       try {
         let ctx = f.dependencies;
         let ci = 0;
         while (ctx && ci < 10) {
           const v = ctx.memoizedValue;
-          if (v && looksLikeLayout(v.mosaicState ?? v.layout ?? v.value)) {
-            stateLayout = v.mosaicState ?? v.layout ?? v.value;
-          }
           if (v && typeof v.mosaicActions?.replaceWith === "function") {
-            // keep reference via bestRef apply wrapper later
-            if (!bestRef.mosaicActions) bestRef.mosaicActions = v.mosaicActions;
+            bestRef.mosaicActions = v.mosaicActions;
           }
           ctx = ctx.next;
           ci += 1;
@@ -119,14 +175,12 @@
         /* ignore */
       }
 
-      if (mosaicActions && !bestRef.mosaicActions) bestRef.mosaicActions = mosaicActions;
-
+      const candidateLayout = layout ?? stateLayout;
+      const candidateApply = onChange || stateSetter || null;
       const interesting =
-        layout != null ||
-        stateLayout != null ||
-        onChange ||
-        mosaicActions ||
-        keys.some((k) => /layout|mosaic|onChange|onRelease|initialValue/i.test(k));
+        candidateLayout != null ||
+        candidateApply ||
+        keys.some((k) => /layout|mosaic|onChange|onRelease/i.test(k));
 
       if (interesting) {
         const entry = {
@@ -142,28 +196,20 @@
           hasStateLayout: stateLayout != null,
           hasOnChange: typeof onChange === "function",
           hasStateSetter: typeof stateSetter === "function",
-          hasMosaicActions: !!(mosaicActions || bestRef.mosaicActions),
-          layoutSample: JSON.stringify(layout ?? stateLayout)?.slice(0, 2500) || null,
+          layoutSample: JSON.stringify(candidateLayout)?.slice(0, 2500) || null,
         };
         findings.push(entry);
 
-        const candidateLayout = layout ?? stateLayout;
-        const candidateApply =
-          onChange ||
-          stateSetter ||
-          null;
-
-        if (
-          candidateLayout != null &&
-          (!bestRef.best ||
-            (candidateApply && !bestRef.best.apply) ||
-            leavesOf(candidateLayout).length > leavesOf(bestRef.best.layout || null).length)
-        ) {
-          bestRef.best = {
-            ...entry,
-            layout: candidateLayout,
-            apply: candidateApply,
-          };
+        if (candidateLayout != null) {
+          const sc = scoreCandidate(candidateLayout, candidateApply, onChange);
+          if (!bestRef.best || sc > bestRef.best._score) {
+            bestRef.best = {
+              ...entry,
+              layout: candidateLayout,
+              apply: candidateApply,
+              _score: sc,
+            };
+          }
         }
       }
 
@@ -194,24 +240,23 @@
       }
     }
 
-    // Also try React root containers on body/#root
     for (const el of [document.getElementById("root"), document.body, document.querySelector("#app")]) {
       if (!el) continue;
       for (const key of Object.keys(el)) {
         if (!key.startsWith("__reactContainer$") && key !== "_reactRootContainer") continue;
-        let root = el[key];
-        let fiber = root?.current || root?._internalRoot?.current || root;
+        const root = el[key];
+        const fiber = root?.current || root?._internalRoot?.current || root;
         if (fiber) collectFromFiber(fiber, findings, bestRef, "react-root", 30);
       }
     }
 
     const seen = new Set();
     const deduped = [];
-    for (const f of findings) {
-      const k = `${f.depth}|${f.type}|${(f.layoutSample || "").slice(0, 60)}`;
+    for (const item of findings) {
+      const k = `${item.depth}|${item.type}|${(item.layoutSample || "").slice(0, 60)}`;
       if (seen.has(k)) continue;
       seen.add(k);
-      deduped.push(f);
+      deduped.push(item);
       if (deduped.length >= 30) break;
     }
 
@@ -227,7 +272,6 @@
       bestType: bestRef.best?.type || null,
       bestDepth: bestRef.best?.depth ?? null,
       _apply: bestRef.best?.apply || null,
-      _mosaicActions: bestRef.mosaicActions || null,
       fiberStartsChecked: starts.length,
     };
   }
@@ -242,7 +286,6 @@
         tree: p.layout,
         leaves: p.leaves,
         hasOnChange: p.hasOnChange,
-        hasMosaicActions: p.hasMosaicActions,
         bestType: p.bestType,
         bestDepth: p.bestDepth,
         reactFindings: p.findings,
@@ -255,7 +298,6 @@
       version: VERSION,
       error: "No React mosaic layout found in MAIN world",
       hasOnChange: false,
-      hasMosaicActions: p.hasMosaicActions,
       reactFindings: p.findings,
       tree: null,
       leaves: [],
@@ -263,53 +305,95 @@
     };
   }
 
-  function apply(tree) {
+  function apply(payload) {
     const p = probe();
-    if (typeof p._apply === "function") {
-      try {
-        p._apply(tree);
-        return {
-          attempted: true,
-          applied: true,
-          mode: "onChange/dispatch",
-          type: p.bestType,
-          depth: p.bestDepth,
-          leaves: leavesOf(tree),
-          version: VERSION,
+    let tree = payload;
+    let adapted = false;
+    let adaptInfo = null;
+
+    // Allow { tree, adapt: true } or raw tree.
+    if (payload && typeof payload === "object" && "tree" in payload) {
+      tree = payload.tree;
+      if (payload.adapt !== false) {
+        const currentLeaves = p.leaves?.length ? p.leaves : leavesOf(p.layout);
+        const visibleLeaves = Array.isArray(payload.visibleLeaves)
+          ? payload.visibleLeaves
+          : [];
+        const before = leavesOf(tree);
+        tree = adaptTree(tree, currentLeaves, visibleLeaves);
+        adapted = true;
+        adaptInfo = {
+          savedLeaves: before,
+          currentLeaves,
+          visibleLeaves,
+          resultLeaves: leavesOf(tree),
+          omittedVisible: currentLeaves.filter(
+            (id) => visibleLeaves.includes(id) && !before.includes(id)
+          ),
         };
-      } catch (err) {
-        try {
-          p._apply(() => tree);
-          return {
-            attempted: true,
-            applied: true,
-            mode: "functional-update",
-            type: p.bestType,
-            depth: p.bestDepth,
-            leaves: leavesOf(tree),
-            version: VERSION,
-          };
-        } catch (err2) {
-          return {
-            attempted: true,
-            applied: false,
-            error: err2.message || err.message,
-            findings: p.findings,
-            version: VERSION,
-          };
-        }
       }
     }
 
-    return {
-      attempted: true,
-      applied: false,
-      error: "no apply function on mosaic fiber",
-      hasMosaicActions: p.hasMosaicActions,
-      findings: p.findings,
-      fiberStartsChecked: p.fiberStartsChecked,
-      version: VERSION,
-    };
+    if (tree == null) {
+      return {
+        attempted: true,
+        applied: false,
+        error: "no tree to apply",
+        adaptInfo,
+        version: VERSION,
+      };
+    }
+
+    if (typeof p._apply !== "function") {
+      return {
+        attempted: true,
+        applied: false,
+        error: "no apply function on mosaic fiber",
+        findings: p.findings,
+        adaptInfo,
+        version: VERSION,
+      };
+    }
+
+    try {
+      p._apply(tree);
+      return {
+        attempted: true,
+        applied: true,
+        mode: "onChange/dispatch",
+        adapted,
+        adaptInfo,
+        type: p.bestType,
+        depth: p.bestDepth,
+        leaves: leavesOf(tree),
+        tree,
+        version: VERSION,
+      };
+    } catch (err) {
+      try {
+        p._apply(() => tree);
+        return {
+          attempted: true,
+          applied: true,
+          mode: "functional-update",
+          adapted,
+          adaptInfo,
+          type: p.bestType,
+          depth: p.bestDepth,
+          leaves: leavesOf(tree),
+          tree,
+          version: VERSION,
+        };
+      } catch (err2) {
+        return {
+          attempted: true,
+          applied: false,
+          error: err2.message || err.message,
+          adaptInfo,
+          version: VERSION,
+        };
+      }
+    }
   }
 
   window.__encordLayoutPage = {
@@ -317,5 +401,7 @@
     capture,
     apply,
     probe,
+    adaptTree,
+    MIN_RIGHT_SPLIT,
   };
 })();
