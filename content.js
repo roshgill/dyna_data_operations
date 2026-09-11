@@ -1,8 +1,9 @@
 (() => {
-  const VERSION = "0.8.2";
+  const VERSION = "0.8.3";
   const STORAGE_KEY = "preferredCameras";
   const LAYOUT_KEY = "preferredMosaicLayout";
   const PREFERRED_ACTIVE_TILE = "cam_high";
+  const MISMATCH_TOAST = "New camera layout detected. Readjust, then Save.";
 
   if (window.__encordCameraLayoutHandler) {
     try {
@@ -690,4 +691,94 @@
 
   chrome.runtime.onMessage.addListener(window.__encordCameraLayoutHandler);
   window.__encordCameraLayoutVersion = VERSION;
+
+  // --- Early warning: saved camera set ≠ this episode ---
+  let lastMismatchToastKey = "";
+  let mismatchTimer = null;
+
+  function episodeKey() {
+    try {
+      const u = new URL(location.href);
+      return `${u.pathname}?taskId=${u.searchParams.get("taskId") || ""}&id=${u.pathname}`;
+    } catch {
+      return location.href;
+    }
+  }
+
+  function collectCurrentLeafIds() {
+    const ids = new Set();
+    for (const el of document.querySelectorAll('[data-testid="tile-display-name"]')) {
+      if (!isVisible(el)) continue;
+      const id = normalizeLabel(el.textContent);
+      if (id) ids.add(id);
+    }
+    for (const el of document.querySelectorAll("[data-tile-id-tag]")) {
+      const id = normalizeLabel(el.getAttribute("data-tile-id-tag"));
+      if (id) ids.add(id);
+    }
+    for (const el of document.querySelectorAll('[data-testid^="main-toolbar-"]')) {
+      const testId = el.getAttribute("data-testid") || "";
+      const id = normalizeLabel(testId.replace(/^main-toolbar-/, ""));
+      if (id) ids.add(id);
+    }
+    return [...ids].sort();
+  }
+
+  function sameLeafSet(a = [], b = []) {
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i += 1) {
+      if (String(a[i]) !== String(b[i])) return false;
+    }
+    return true;
+  }
+
+  async function checkMismatchWarning() {
+    if (!location.pathname.includes("/label_editor/")) return;
+
+    const stored = await chrome.storage.local.get(LAYOUT_KEY);
+    const savedLeaves = (stored[LAYOUT_KEY]?.leaves || []).map(String).sort();
+    if (!savedLeaves.length) return;
+
+    const currentLeaves = collectCurrentLeafIds();
+    // Wait until mosaic has actually mounted cameras.
+    if (currentLeaves.length < 1) return;
+    if (sameLeafSet(savedLeaves, currentLeaves)) return;
+
+    const toastKey = `${episodeKey()}::${currentLeaves.join("|")}::${savedLeaves.join("|")}`;
+    if (toastKey === lastMismatchToastKey) return;
+    lastMismatchToastKey = toastKey;
+    showToast(MISMATCH_TOAST, "warn");
+  }
+
+  function scheduleMismatchCheck() {
+    clearTimeout(mismatchTimer);
+    mismatchTimer = setTimeout(() => {
+      checkMismatchWarning().catch(() => {});
+    }, 700);
+  }
+
+  if (!window.__encordLayoutMismatchWatch) {
+    window.__encordLayoutMismatchWatch = true;
+    let lastHref = location.href;
+    setInterval(() => {
+      if (location.href !== lastHref) {
+        lastHref = location.href;
+        lastMismatchToastKey = "";
+        scheduleMismatchCheck();
+      }
+    }, 1000);
+
+    const mo = new MutationObserver(() => scheduleMismatchCheck());
+    mo.observe(document.documentElement, { childList: true, subtree: true });
+
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area !== "local" || !changes[LAYOUT_KEY]) return;
+      lastMismatchToastKey = "";
+      scheduleMismatchCheck();
+    });
+
+    scheduleMismatchCheck();
+    setTimeout(scheduleMismatchCheck, 2000);
+    setTimeout(scheduleMismatchCheck, 5000);
+  }
 })();

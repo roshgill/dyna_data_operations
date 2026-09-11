@@ -133,10 +133,17 @@ const LayoutOps = (() => {
     });
     if (!result?.ok) throw new Error(result?.error || "Restore failed.");
 
-    const message = result.message || "Layout restored.";
-    await toast(active.id, message, result.reactRestore?.applied ? "ok" : "warn");
-    await setBadge(result.reactRestore?.applied ? "OK" : "!", result.reactRestore?.applied ? "#2f6f3e" : "#a15c00");
-    await chrome.storage.local.set({ lastAction: { type: "restore", message, at: Date.now() } });
+    const message = "Cameras adjusted";
+    await toast(active.id, message, "ok");
+    await setBadge("OK", "#2f6f3e");
+    await chrome.storage.local.set({
+      lastAction: {
+        type: "restore",
+        message,
+        detail: result.message || "",
+        at: Date.now(),
+      },
+    });
     return result;
   }
 
