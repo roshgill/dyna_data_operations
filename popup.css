@@ -1,15 +1,15 @@
 :root {
-  color-scheme: dark;
-  --bg: #0d0d0d;
-  --bg-elevated: #141414;
-  --fg: #ffffff;
-  --muted: #a0a0a0;
-  --muted-dim: #6e6e6e;
-  --border: rgba(255, 255, 255, 0.12);
-  --border-strong: rgba(255, 255, 255, 0.2);
-  --btn-secondary: #1a1a1a;
-  --btn-primary: #2a2a2a;
-  --btn-primary-hover: #333333;
+  color-scheme: light;
+  --bg: #f2f0e9;
+  --bg-elevated: #ebe9e1;
+  --fg: #1a1a1a;
+  --muted: #6b6b6b;
+  --muted-dim: #8a8a8a;
+  --border: rgba(26, 26, 26, 0.12);
+  --border-strong: rgba(26, 26, 26, 0.2);
+  --btn-secondary: #e4e2da;
+  --btn-primary: #dddbd3;
+  --btn-primary-hover: #d4d2c9;
   --status-live: #b6ff3b;
   --radius-control: 6px;
   --radius-panel: 10px;
@@ -27,7 +27,7 @@ body {
   min-height: 100vh;
   color: var(--fg);
   background:
-    radial-gradient(ellipse 120% 80% at 0% 0%, rgba(255, 255, 255, 0.03), transparent 55%),
+    radial-gradient(ellipse 120% 80% at 0% 0%, rgba(26, 26, 26, 0.03), transparent 55%),
     var(--bg);
   font-family: var(--font-ui);
   font-size: 13px;
@@ -105,7 +105,7 @@ button {
 
 button:hover:not(:disabled) {
   border-color: var(--border-strong);
-  background: #1f1f1f;
+  background: #dcdad2;
 }
 
 button:active:not(:disabled) {

@@ -551,8 +551,21 @@
     const el = document.createElement("div");
     el.id = "encord-camera-layout-toast";
     el.textContent = message;
-    const bg =
-      kind === "ok" ? "#1f6b3a" : kind === "error" ? "#8b1e1e" : kind === "warn" ? "#7a4b00" : "#2b2b2b";
+
+    // Success/info: Dyna Light off-white. Warn/error: hard red + white text.
+    const palette =
+      kind === "error" || kind === "warn"
+        ? {
+            background: "#c62828",
+            color: "#ffffff",
+            border: "1px solid rgba(0, 0, 0, 0.12)",
+          }
+        : {
+            background: "#f2f0e9",
+            color: "#1a1a1a",
+            border: "1px solid rgba(26, 26, 26, 0.12)",
+          };
+
     Object.assign(el.style, {
       position: "fixed",
       right: "16px",
@@ -561,10 +574,11 @@
       maxWidth: "420px",
       padding: "10px 14px",
       borderRadius: "10px",
-      background: bg,
-      color: "#fff",
-      font: "13px/1.35 system-ui, -apple-system, sans-serif",
-      boxShadow: "0 8px 24px rgba(0,0,0,.35)",
+      background: palette.background,
+      color: palette.color,
+      border: palette.border,
+      font: '13px/1.35 "Avenir Next", "Segoe UI", "Helvetica Neue", Helvetica, sans-serif',
+      boxShadow: "0 4px 16px rgba(26, 26, 26, 0.08)",
       opacity: "0",
       transition: "opacity .15s ease",
       pointerEvents: "none",
