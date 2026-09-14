@@ -8,18 +8,26 @@
   </head>
   <body>
     <main>
-      <h1>Camera layout</h1>
-      <p class="hint">
-        v0.9 — saves preferred + default; warns only when defaults differ.
-      </p>
+      <header class="hero">
+        <p class="meta">[ DETAILS ]</p>
+        <h1>Encord Camera Layout</h1>
+        <p class="hint">Arrange panes, then save. Click the toolbar icon anytime to restore.</p>
+      </header>
 
       <div class="actions">
+        <button id="restore" type="button" class="primary">
+          Restore layout<span class="dot-arrow" aria-hidden="true">···</span>
+        </button>
         <button id="save" type="button">Save layout</button>
-        <button id="restore" type="button" class="primary">Restore layout</button>
       </div>
 
-      <p id="status" class="status" aria-live="polite"></p>
-      <pre id="preview" class="preview" hidden></pre>
+      <section class="feedback">
+        <p id="status" class="status" aria-live="polite"></p>
+      </section>
+
+      <footer class="foot">
+        <span class="meta">v0.9</span>
+      </footer>
     </main>
     <script src="layout-ops.js"></script>
     <script src="popup.js"></script>
