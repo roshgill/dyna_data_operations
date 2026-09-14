@@ -79,11 +79,22 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   }
 });
 
-// Popup / other pages can request the same ops.
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+// Popup / content can request the same ops.
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   (async () => {
     if (message?.type === "OPS_RESTORE") return LayoutOps.restore(message.tab);
     if (message?.type === "OPS_SAVE") return LayoutOps.save(message.tab);
+    if (message?.type === "CHECK_LAYOUT_MISMATCH") {
+      const tab = message.tab || sender.tab;
+      return LayoutOps.checkMismatch(tab);
+    }
+    if (message?.type === "LOCK_EPISODE_DEFAULT") {
+      const tab = message.tab || sender.tab;
+      return LayoutOps.lockEpisodeDefault(tab);
+    }
+    if (message?.type === "CLEAR_EPISODE_DEFAULT") {
+      return LayoutOps.clearEpisodeDefault();
+    }
     return { ok: false, error: "Unknown background op." };
   })()
     .then(sendResponse)

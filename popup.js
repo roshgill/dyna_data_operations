@@ -69,7 +69,7 @@ saveBtn.addEventListener("click", async () => {
     const result = await LayoutOps.save();
     if (!result?.ok) throw new Error(result?.error || "Save failed.");
     setStatus(
-      result.message || "Saved.",
+      "Saved layout",
       result.mosaic?.tree ? JSON.stringify(result.mosaic.tree, null, 2) : formatCameras(result.cameras)
     );
   } catch (err) {

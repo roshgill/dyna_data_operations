@@ -104,6 +104,9 @@ const LayoutOps = (() => {
 
   async function restore(tab) {
     const active = await requireEncordTab(tab);
+    // Lock episode default BEFORE restore changes the mosaic.
+    await lockEpisodeDefault(active);
+
     const saved = await chrome.tabs.sendMessage(active.id, { type: "GET_SAVED_LAYOUT" });
     const layout = saved?.mosaic;
     if (!layout?.tree) {
@@ -149,6 +152,12 @@ const LayoutOps = (() => {
 
   async function save(tab) {
     const active = await requireEncordTab(tab);
+    // Prefer the default captured at episode load (before rearrange).
+    let episodeDefault = await getLockedEpisodeDefault(active.url);
+    if (!episodeDefault?.leaves?.length) {
+      episodeDefault = await lockEpisodeDefault(active, { force: false });
+    }
+
     const pageWorld = await runPageWorld(active.id, "capture");
     const result = await chrome.tabs.sendMessage(active.id, {
       type: "SAVE_CAMERAS",
@@ -156,11 +165,158 @@ const LayoutOps = (() => {
     });
     if (!result?.ok) throw new Error(result?.error || "Save failed.");
 
-    const message = result.message || "Layout saved.";
+    const defaultLeaves = episodeDefault?.leaves?.length
+      ? uniqLeaves(episodeDefault.leaves)
+      : uniqLeaves(pageWorld?.leaves || result?.mosaic?.leaves || []);
+
+    const message = "Saved layout";
     await toast(active.id, message, "ok");
     await setBadge("SAV", "#2f6f3e");
-    await chrome.storage.local.set({ lastAction: { type: "save", message, at: Date.now() } });
+    await chrome.storage.local.set({
+      savedDefaultLeaves: defaultLeaves,
+      lastAction: { type: "save", message, detail: result.message || "", at: Date.now() },
+      lastMismatchToastKey: "",
+    });
     return result;
+  }
+
+  function uniqLeaves(a = []) {
+    return [...new Set([...a].map(String))].sort();
+  }
+
+  function sameLeafSet(a = [], b = []) {
+    const left = uniqLeaves(a);
+    const right = uniqLeaves(b);
+    if (left.length !== right.length) return false;
+    return left.every((v, i) => v === right[i]);
+  }
+
+  function episodeUrlKey(url = "") {
+    try {
+      const u = new URL(url);
+      return `${u.origin}${u.pathname}?taskId=${u.searchParams.get("taskId") || ""}`;
+    } catch {
+      return url;
+    }
+  }
+
+  async function getLockedEpisodeDefault(url) {
+    const { currentEpisodeDefault } = await chrome.storage.local.get("currentEpisodeDefault");
+    if (!currentEpisodeDefault) return null;
+    if (currentEpisodeDefault.url !== episodeUrlKey(url)) return null;
+    if (!currentEpisodeDefault.locked) return null;
+    return currentEpisodeDefault;
+  }
+
+  /**
+   * Capture and lock this episode's default camera set once (as loaded, before rearrange/restore).
+   */
+  async function lockEpisodeDefault(tab, { force = false } = {}) {
+    const active = tab?.id ? tab : await getActiveTab();
+    if (!active?.id || !isEncordUrl(active.url)) return null;
+    if (!String(active.url || "").includes("/label_editor/")) return null;
+
+    const urlKey = episodeUrlKey(active.url);
+    const { currentEpisodeDefault } = await chrome.storage.local.get("currentEpisodeDefault");
+
+    if (
+      !force &&
+      currentEpisodeDefault?.url === urlKey &&
+      currentEpisodeDefault?.locked &&
+      currentEpisodeDefault?.leaves?.length
+    ) {
+      return currentEpisodeDefault;
+    }
+
+    await ensureContentScript(active.id);
+    const capture = await runPageWorld(active.id, "capture");
+    const leaves = uniqLeaves(capture?.leaves || []);
+    if (!leaves.length) return null;
+
+    const pending =
+      currentEpisodeDefault?.url === urlKey
+        ? currentEpisodeDefault
+        : { url: urlKey, candidate: null, stableHits: 0, locked: false };
+
+    if (sameLeafSet(pending.candidate || [], leaves)) {
+      pending.stableHits = (pending.stableHits || 0) + 1;
+      pending.candidate = leaves;
+    } else {
+      pending.candidate = leaves;
+      pending.stableHits = 1;
+      pending.locked = false;
+    }
+    pending.url = urlKey;
+
+    if (pending.stableHits >= 2 || force) {
+      const locked = {
+        url: urlKey,
+        leaves: pending.candidate,
+        locked: true,
+        lockedAt: Date.now(),
+      };
+      await chrome.storage.local.set({ currentEpisodeDefault: locked });
+      return locked;
+    }
+
+    await chrome.storage.local.set({ currentEpisodeDefault: pending });
+    return null;
+  }
+
+  async function clearEpisodeDefault() {
+    await chrome.storage.local.set({
+      currentEpisodeDefault: null,
+      lastMismatchToastKey: "",
+    });
+  }
+
+  /**
+   * Warn only when this episode's *default* camera set differs from the last saved default.
+   * Preferred (Restore) layout is separate and may be a subset.
+   */
+  async function checkMismatch(tab) {
+    const active = tab?.id ? tab : await getActiveTab();
+    if (!active?.id || !isEncordUrl(active.url)) {
+      return { matched: true, reason: "not-encord" };
+    }
+    if (!String(active.url || "").includes("/label_editor/")) {
+      return { matched: true, reason: "not-editor" };
+    }
+
+    const stored = await chrome.storage.local.get([
+      "savedDefaultLeaves",
+      "lastMismatchToastKey",
+    ]);
+    const savedDefault = uniqLeaves(stored.savedDefaultLeaves || []);
+    if (!savedDefault.length) {
+      // Establish episode default early even before first Save.
+      await lockEpisodeDefault(active);
+      return { matched: true, reason: "no-saved-default" };
+    }
+
+    const episodeDefault = await lockEpisodeDefault(active);
+    if (!episodeDefault?.locked || !episodeDefault.leaves?.length) {
+      return { matched: true, reason: "default-not-locked" };
+    }
+
+    const currentDefault = uniqLeaves(episodeDefault.leaves);
+    if (sameLeafSet(savedDefault, currentDefault)) {
+      return {
+        matched: true,
+        reason: "defaults-match",
+        savedDefault,
+        currentDefault,
+      };
+    }
+
+    const toastKey = `${episodeUrlKey(active.url)}::${currentDefault.join("|")}::${savedDefault.join("|")}`;
+    if (toastKey === stored.lastMismatchToastKey) {
+      return { matched: false, toasted: false, savedDefault, currentDefault };
+    }
+
+    await chrome.storage.local.set({ lastMismatchToastKey: toastKey });
+    await toast(active.id, "New camera layout detected. Readjust, then Save.", "warn");
+    return { matched: false, toasted: true, savedDefault, currentDefault };
   }
 
   return {
@@ -170,6 +326,9 @@ const LayoutOps = (() => {
     runPageWorld,
     restore,
     save,
+    checkMismatch,
+    lockEpisodeDefault,
+    clearEpisodeDefault,
     toast,
     setBadge,
   };
