@@ -88,9 +88,14 @@ const LayoutOps = (() => {
     }
   }
 
-  async function setBadge(text, color = "#5b3cc4") {
+  async function setBadge(text, color = "#f2f0e9", textColor = "#1a1a1a") {
     try {
       await chrome.action.setBadgeBackgroundColor({ color });
+      try {
+        await chrome.action.setBadgeTextColor({ color: textColor });
+      } catch {
+        /* older Chrome */
+      }
       await chrome.action.setBadgeText({ text: text || "" });
       if (text) {
         setTimeout(() => {
@@ -119,7 +124,7 @@ const LayoutOps = (() => {
     ) {
       const message = "Camera set changed. Adjust layout, then Save.";
       await toast(active.id, message, "warn");
-      await setBadge("!", "#a15c00");
+      await setBadge("!", "#c62828", "#ffffff");
       await chrome.storage.local.set({
         lastAction: { type: "restore-blocked", message, at: Date.now() },
       });
@@ -157,7 +162,7 @@ const LayoutOps = (() => {
 
     const message = "Cameras adjusted";
     await toast(active.id, message, "ok");
-    await setBadge("OK", "#2f6f3e");
+    await setBadge("OK", "#f2f0e9", "#1a1a1a");
     await chrome.storage.local.set({
       lastAction: {
         type: "restore",
@@ -190,7 +195,7 @@ const LayoutOps = (() => {
 
     const message = "Saved layout";
     await toast(active.id, message, "ok");
-    await setBadge("SAV", "#2f6f3e");
+    await setBadge("SAV", "#f2f0e9", "#1a1a1a");
     await chrome.storage.local.set({
       savedDefaultLeaves: defaultLeaves,
       lastAction: { type: "save", message, detail: result.message || "", at: Date.now() },

@@ -34,7 +34,7 @@ async function withErrorToast(tab, fn) {
     if (tab?.id) {
       await LayoutOps.toast(tab.id, message, "error");
     }
-    await LayoutOps.setBadge("!", "#b42318");
+    await LayoutOps.setBadge("!", "#c62828", "#ffffff");
     await chrome.storage.local.set({
       lastAction: { type: "error", message, at: Date.now() },
     });
