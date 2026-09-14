@@ -105,7 +105,26 @@ const LayoutOps = (() => {
   async function restore(tab) {
     const active = await requireEncordTab(tab);
     // Lock episode default BEFORE restore changes the mosaic.
-    await lockEpisodeDefault(active);
+    const episodeDefault = await lockEpisodeDefault(active);
+
+    const stored = await chrome.storage.local.get(["savedDefaultLeaves"]);
+    const savedDefault = uniqLeaves(stored.savedDefaultLeaves || []);
+    const currentDefault = uniqLeaves(episodeDefault?.leaves || []);
+
+    // Saved preferred layout was built for a different default camera set — don't apply it.
+    if (
+      savedDefault.length &&
+      currentDefault.length &&
+      !sameLeafSet(savedDefault, currentDefault)
+    ) {
+      const message = "Camera set changed. Adjust layout, then Save.";
+      await toast(active.id, message, "warn");
+      await setBadge("!", "#a15c00");
+      await chrome.storage.local.set({
+        lastAction: { type: "restore-blocked", message, at: Date.now() },
+      });
+      return { ok: false, blocked: true, error: message };
+    }
 
     const saved = await chrome.tabs.sendMessage(active.id, { type: "GET_SAVED_LAYOUT" });
     const layout = saved?.mosaic;
