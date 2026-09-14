@@ -11,8 +11,35 @@ const LayoutOps = (() => {
   }
 
   async function getActiveTab() {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    return tab;
+    // Details opens as its own popup window, so currentWindow is the panel —
+    // not the Encord editor. Prefer the last-focused normal browser window.
+    try {
+      const win = await chrome.windows.getLastFocused({
+        populate: true,
+        windowTypes: ["normal"],
+      });
+      const active = win?.tabs?.find((t) => t.active);
+      if (active?.id && isEncordUrl(active.url)) return active;
+    } catch {
+      /* ignore */
+    }
+
+    const encordTabs = await chrome.tabs.query({
+      url: ["https://app.encord.com/*", "https://app.us.encord.com/*"],
+    });
+    const activeEncord = encordTabs.find((t) => t.active);
+    if (activeEncord) return activeEncord;
+    if (encordTabs.length) {
+      return [...encordTabs].sort(
+        (a, b) => (b.lastAccessed || 0) - (a.lastAccessed || 0)
+      )[0];
+    }
+
+    const [fallback] = await chrome.tabs.query({
+      active: true,
+      lastFocusedWindow: true,
+    });
+    return fallback;
   }
 
   async function ensureContentScript(tabId) {

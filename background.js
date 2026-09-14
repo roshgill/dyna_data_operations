@@ -69,8 +69,11 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     return;
   }
   if (info.menuItemId === MENU.DETAILS) {
+    const params = new URLSearchParams();
+    if (tab?.id) params.set("tabId", String(tab.id));
+    const qs = params.toString();
     await chrome.windows.create({
-      url: chrome.runtime.getURL("popup.html"),
+      url: chrome.runtime.getURL(`popup.html${qs ? `?${qs}` : ""}`),
       type: "popup",
       width: 360,
       height: 460,

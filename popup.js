@@ -2,6 +2,20 @@ const statusEl = document.getElementById("status");
 const saveBtn = document.getElementById("save");
 const restoreBtn = document.getElementById("restore");
 
+const openerTabId = Number(new URLSearchParams(location.search).get("tabId") || "");
+
+async function resolveTargetTab() {
+  if (Number.isFinite(openerTabId) && openerTabId > 0) {
+    try {
+      const tab = await chrome.tabs.get(openerTabId);
+      if (tab?.id && LayoutOps.isEncordUrl(tab.url)) return tab;
+    } catch {
+      /* tab closed — fall through */
+    }
+  }
+  return undefined;
+}
+
 function setStatus(message) {
   statusEl.classList.remove("is-visible");
   void statusEl.offsetWidth;
@@ -35,7 +49,7 @@ saveBtn.addEventListener("click", async () => {
   setBusy(true);
   setStatus("Saving…");
   try {
-    const result = await LayoutOps.save();
+    const result = await LayoutOps.save(await resolveTargetTab());
     if (!result?.ok) throw new Error(result?.error || "Save failed.");
     setStatus("Saved layout");
   } catch (err) {
@@ -49,7 +63,7 @@ restoreBtn.addEventListener("click", async () => {
   setBusy(true);
   setStatus("Restoring…");
   try {
-    const result = await LayoutOps.restore();
+    const result = await LayoutOps.restore(await resolveTargetTab());
     if (!result?.ok) throw new Error(result?.error || "Restore failed.");
     setStatus("Cameras adjusted");
   } catch (err) {
