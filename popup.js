@@ -42,7 +42,7 @@ async function refreshStatus() {
     setStatus("Layout saved.");
     return;
   }
-  setStatus("No saved layout yet. Arrange panes, then Save.");
+  setStatus("No camera layout saved yet. Adjust your cameras, then save.");
 }
 
 saveBtn.addEventListener("click", async () => {

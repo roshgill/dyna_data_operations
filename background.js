@@ -46,7 +46,7 @@ async function withErrorToast(tab, fn) {
 chrome.runtime.onInstalled.addListener(() => {
   installContextMenus();
   chrome.action.setTitle({
-    title: "Encord Camera Layout — click to restore · right-click for Save / details",
+    title: "Dyna Ops: Encord Camera Layout. Click to restore layout · Right click to save layout | details",
   });
 });
 
@@ -108,5 +108,5 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 // Ensure menus exist after extension reload / SW wake.
 installContextMenus();
 chrome.action.setTitle({
-  title: "Encord Camera Layout — click to restore · right-click for Save / details",
+  title: "Dyna Ops: Encord Camera Layout. Click to restore layout · Right click to save layout | details",
 });

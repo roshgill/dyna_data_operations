@@ -423,7 +423,7 @@
   async function saveCameras(pageWorld) {
     const cameras = discoverVisibleTiles();
     if (!cameras.length && !(pageWorld?.leaves?.length)) {
-      return { ok: false, error: "No mosaic camera tiles found." };
+      return { ok: false, error: "No cameras found on this page." };
     }
 
     const domMosaic = captureMosaicLayoutFromDom();
@@ -521,7 +521,7 @@
         reactRestore.error || "unknown"
       }.`;
     } else {
-      message = "No saved mosaic tree. Arrange panes (shrink ghost to the right), then Save.";
+      message = "No saved layout yet. Arrange your cameras, then save.";
     }
 
     // After layout settle, focus cam_high so annotating can start immediately.
