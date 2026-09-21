@@ -1,6 +1,6 @@
 // Runs in the page's MAIN world (real React fibers).
 (function () {
-  const VERSION = "0.7.1";
+  const VERSION = "0.8.3";
   // Always refresh API when version changes.
   if (window.__encordLayoutPage?.version === VERSION) return;
 
@@ -396,11 +396,180 @@
     }
   }
 
+  function readCurrentFrame() {
+    const el = document.querySelector('[data-testid="currentFrame"]');
+    const n = Number(String(el?.textContent || "").replace(/[^\d]/g, ""));
+    return Number.isFinite(n) ? n : null;
+  }
+
+  /** Jump playhead via Ant/React onChange on the frame spinner (MAIN world). */
+  function gotoFrame(frame) {
+    const target = Math.max(0, Math.floor(Number(frame) || 0));
+    const input = document.querySelector('[data-testid="content-navigation-frame-input"]');
+    if (!input) return { ok: false, error: "no-frame-input" };
+
+    let handled = false;
+    let fiber = getFiber(input);
+    let depth = 0;
+    while (fiber && depth < 25 && !handled) {
+      const props = fiber.memoizedProps || {};
+      const onChange = props.onChange;
+      if (typeof onChange === "function") {
+        try {
+          // Ant Design InputNumber may want number or event-like value
+          onChange(target);
+          handled = true;
+          break;
+        } catch {
+          try {
+            onChange({ target: { value: target } });
+            handled = true;
+            break;
+          } catch {
+            /* keep walking */
+          }
+        }
+      }
+      fiber = fiber.return;
+      depth += 1;
+    }
+
+    if (!handled) {
+      try {
+        const proto = window.HTMLInputElement.prototype;
+        const desc = Object.getOwnPropertyDescriptor(proto, "value");
+        desc?.set?.call(input, String(target));
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+        handled = true;
+      } catch (err) {
+        return { ok: false, error: err.message || String(err) };
+      }
+    }
+
+    const cur = readCurrentFrame();
+    return {
+      ok: cur != null && Math.abs(cur - target) <= 1,
+      frame: cur,
+      target,
+      via: handled ? "react-or-dom" : "none",
+      version: VERSION,
+    };
+  }
+
+  // Bridge for isolated content scripts (grade sync)
+  window.addEventListener("message", (event) => {
+    if (event.source !== window) return;
+    const data = event.data;
+    if (!data || data.source !== "encord-grade-sync") return;
+
+    if (data.type === "GOTO_FRAME") {
+      let result;
+      try {
+        result = gotoFrame(data.frame);
+      } catch (err) {
+        result = { ok: false, error: err.message || String(err) };
+      }
+      window.postMessage(
+        { source: "encord-grade-sync", type: "GOTO_FRAME_RESULT", id: data.id, result },
+        "*"
+      );
+      return;
+    }
+
+    if (data.type === "SET_RANGE_INPUT") {
+      let result = { ok: false, error: "not-found" };
+      try {
+        const aria = String(data.ariaLabel || "");
+        const frame = Math.max(0, Math.floor(Number(data.frame) || 0));
+        const input =
+          (aria && document.querySelector(`input[aria-label="${aria}"]`)) ||
+          (aria &&
+            [...document.querySelectorAll("input")].find((el) =>
+              (el.getAttribute("aria-label") || "").includes(aria)
+            ));
+        if (!input) {
+          result = { ok: false, error: "input-missing", aria };
+        } else {
+          let fiber = getFiber(input);
+          let depth = 0;
+          let handled = false;
+          const tryCall = (fn, arg) => {
+            if (typeof fn !== "function") return false;
+            try {
+              fn(arg);
+              return true;
+            } catch {
+              return false;
+            }
+          };
+          while (fiber && depth < 25 && !handled) {
+            const props = fiber.memoizedProps || {};
+            const fakeEvent = {
+              target: { value: String(frame) },
+              currentTarget: { value: String(frame) },
+              key: "Enter",
+              code: "Enter",
+              keyCode: 13,
+              which: 13,
+              type: "change",
+              preventDefault() {},
+              stopPropagation() {},
+            };
+            handled =
+              tryCall(props.onChange, fakeEvent) ||
+              tryCall(props.onChange, String(frame)) ||
+              tryCall(props.onChange, frame) ||
+              tryCall(props.onPressEnter, fakeEvent) ||
+              tryCall(props.onBlur, fakeEvent) ||
+              tryCall(props.onInput, fakeEvent);
+            if (!handled) {
+              for (const key of Object.keys(props)) {
+                if (!/frame|range|start|end|bound/i.test(key)) continue;
+                const v = props[key];
+                if (typeof v === "function" && tryCall(v, frame)) {
+                  handled = true;
+                  break;
+                }
+              }
+            }
+            fiber = fiber.return;
+            depth += 1;
+          }
+          if (!handled) {
+            const proto = window.HTMLInputElement.prototype;
+            const desc = Object.getOwnPropertyDescriptor(proto, "value");
+            desc?.set?.call(input, String(frame));
+            input.dispatchEvent(new Event("input", { bubbles: true }));
+            input.dispatchEvent(new Event("change", { bubbles: true }));
+            input.dispatchEvent(
+              new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true })
+            );
+            handled = true;
+          }
+          result = {
+            ok: String(input.value || "").replace(/[^\d]/g, "") === String(frame),
+            value: input.value,
+            handled,
+            version: VERSION,
+          };
+        }
+      } catch (err) {
+        result = { ok: false, error: err.message || String(err) };
+      }
+      window.postMessage(
+        { source: "encord-grade-sync", type: "SET_RANGE_RESULT", id: data.id, result },
+        "*"
+      );
+    }
+  });
+
   window.__encordLayoutPage = {
     version: VERSION,
     capture,
     apply,
     probe,
+    gotoFrame,
     adaptTree,
     MIN_RIGHT_SPLIT,
   };

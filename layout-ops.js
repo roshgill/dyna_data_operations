@@ -43,12 +43,24 @@ const LayoutOps = (() => {
   }
 
   async function ensureContentScript(tabId) {
+    let needInject = false;
     try {
       await chrome.tabs.sendMessage(tabId, { type: "PING" });
     } catch {
+      needInject = true;
+    }
+    if (!needInject) {
+      try {
+        const grade = await chrome.tabs.sendMessage(tabId, { type: "GRADE_SYNC_STATUS" });
+        if (!grade?.ok) needInject = true;
+      } catch {
+        needInject = true;
+      }
+    }
+    if (needInject) {
       await chrome.scripting.executeScript({
         target: { tabId },
-        files: ["content.js"],
+        files: ["content.js", "trajectory-sync.js"],
       });
     }
   }
@@ -370,6 +382,44 @@ const LayoutOps = (() => {
     return { matched: false, toasted: true, savedDefault, currentDefault };
   }
 
+  async function scanTimeline(tab) {
+    const active = await requireEncordTab(tab);
+    const result = await chrome.tabs.sendMessage(active.id, { type: "SCAN_TIMELINE" });
+    if (!result?.ok) throw new Error(result?.error || "Timeline scan failed.");
+    return result;
+  }
+
+  async function scanFullDom(tab) {
+    const active = await requireEncordTab(tab);
+    const result = await chrome.tabs.sendMessage(active.id, { type: "SCAN_FULL_DOM" });
+    if (!result?.ok) throw new Error(result?.error || "Full DOM scan failed.");
+    return result;
+  }
+
+  async function gradeStatus(tab) {
+    const active = await requireEncordTab(tab);
+    return chrome.tabs.sendMessage(active.id, { type: "GRADE_SYNC_STATUS" });
+  }
+
+  async function gradeSyncNow(tab) {
+    const active = await requireEncordTab(tab);
+    return chrome.tabs.sendMessage(active.id, { type: "GRADE_SYNC_NOW" });
+  }
+
+  async function setGradeEnabled(tab, enabled) {
+    const active = await requireEncordTab(tab);
+    await chrome.storage.local.set({ autoGradeEnabled: !!enabled });
+    try {
+      await chrome.tabs.sendMessage(active.id, {
+        type: "GRADE_SYNC_SET_ENABLED",
+        enabled: !!enabled,
+      });
+    } catch {
+      /* content may reload */
+    }
+    return { ok: true, enabled: !!enabled };
+  }
+
   return {
     isEncordUrl,
     getActiveTab,
@@ -377,6 +427,11 @@ const LayoutOps = (() => {
     runPageWorld,
     restore,
     save,
+    scanTimeline,
+    scanFullDom,
+    gradeStatus,
+    gradeSyncNow,
+    setGradeEnabled,
     checkMismatch,
     lockEpisodeDefault,
     clearEpisodeDefault,
