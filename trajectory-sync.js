@@ -2,8 +2,10 @@
 // Write path: Encord classification UI (frame jump + C/V/M or Range start/end inputs).
 // No timeline draw-drag / alt-click / shift-click (those create single-frame pins).
 (() => {
-  const VERSION = "0.14.4-grade";
+  const VERSION = "0.14.9-grade";
   const STORAGE_ENABLED = "autoGradeEnabled";
+  // v2 key — invalidates bad caches that stored lastStepNum=2 from truncated scrapes
+  const STORAGE_DEFINED_STEPS = "gradeSyncDefinedStepsV2";
   const PCT_EPS = 0.4;
   const FRAME_EPS = 1;
   const WORKFLOW_DEBOUNCE_MS = 550;
@@ -15,6 +17,9 @@
   let debounceTimer = null;
   let lastToastKey = "";
   let lastAppliedKey = "";
+  /** @type {{ projectKey: string, lastStepNum: number, steps: { stepNum: number, label: string }[], via: string } | null} */
+  let definedStepsCache = null;
+  let discoveringSteps = false;
 
   function normalizeLabel(text) {
     return (text || "").replace(/\s+/g, " ").trim();
@@ -123,15 +128,315 @@
     return m ? Number(m[1]) : null;
   }
 
-  function findLastStepRange() {
-    const steps = listRanges("row-step", { includePins: false })
+  function getProjectKey() {
+    const m = location.pathname.match(/\/label_editor\/([^/]+)/);
+    return m ? m[1] : location.pathname;
+  }
+
+  function isInTimelineChrome(el) {
+    return !!(
+      el?.closest?.(
+        '[data-testid="classification-timeline"], [data-testid="row-step"], [data-testid="row-trajectory"], [data-testid="scrollable-timeline-id"], [data-testid="timeline-left-rows-id"], [data-testid="range"]'
+      )
+    );
+  }
+
+  function isInLabelsPane(el) {
+    return !!(
+      el?.closest?.(
+        '[data-testid="editor-sider-bottom-pane"], [data-testid="sider-labels-toggle"], [data-testid="data-group-labels-by-tile"]'
+      )
+    );
+  }
+
+  function listTimelineSteps() {
+    return listRanges("row-step", { includePins: false })
       .map((r) => ({ ...r, stepNum: parseStepNumber(r.label) }))
       .filter((r) => r.stepNum != null && r.width >= 0.35);
+  }
+
+  function findStepRangeByNum(stepNum) {
+    const want = Number(stepNum);
+    if (!Number.isFinite(want)) return null;
+    const matches = listTimelineSteps().filter((s) => s.stepNum === want);
+    if (!matches.length) return null;
+    // Prefer the widest / rightmost instance of that step id
+    matches.sort((a, b) => b.width - a.width || b.end - a.end);
+    return matches[0];
+  }
+
+  /** Rightmost/highest step currently drawn — NOT the ontology last step. */
+  function findLastTimelineStepRange() {
+    const steps = listTimelineSteps();
     if (!steps.length) return null;
     const maxN = Math.max(...steps.map((s) => s.stepNum));
-    const candidates = steps.filter((s) => s.stepNum === maxN);
-    candidates.sort((a, b) => b.width - a.width || b.end - a.end);
-    return candidates[0];
+    return findStepRangeByNum(maxN);
+  }
+
+  function definedStepScrapeRoots() {
+    return [
+      document.querySelector('[data-testid="object-left-panel"]'),
+      document.querySelector('[data-testid="editor-sider-top-pane"]'),
+      document.querySelector('[data-testid="editor-sider-ontology-list"]')?.parentElement,
+      document.querySelector('[data-testid="editor-sider"]'),
+    ].filter(Boolean);
+  }
+
+  function parseStepNumFromText(raw) {
+    const t = normalizeLabel(raw);
+    if (!t) return null;
+    // Prefer start-of-string; else first "step N" in the node (icons/hotkeys may prefix)
+    const m = t.match(/^step\s*(\d+)\b/i) || t.match(/\bstep\s*(\d+)\b/i);
+    if (!m) return null;
+    const stepNum = Number(m[1]);
+    return Number.isFinite(stepNum) ? { stepNum, label: t.slice(0, 160) } : null;
+  }
+
+  /**
+   * Ontology Step options are an ordered list (tree / radio rows).
+   * Last defined = last object in that list (DOM order), not Math.max of a partial scrape.
+   */
+  function scrapeOrderedStepOptions(root) {
+    if (!root) return [];
+    const ordered = [];
+    const seen = new Set();
+
+    const push = (raw, el) => {
+      if (!el || isInTimelineChrome(el) || isInLabelsPane(el)) return;
+      const parsed = parseStepNumFromText(raw);
+      if (!parsed || seen.has(parsed.stepNum)) return;
+      seen.add(parsed.stepNum);
+      ordered.push({
+        stepNum: parsed.stepNum,
+        label: parsed.label,
+        order: ordered.length,
+      });
+    };
+
+    // 1) Walk treeitems top → bottom (Encord Step option list)
+    const treeItems = [...root.querySelectorAll('[role="treeitem"]')].filter((el) => {
+      const style = el.getAttribute("style") || "";
+      if (/display:\s*none/i.test(style)) return false;
+      return !!el.querySelector("label.ant-radio-wrapper, label, .ant-radio");
+    });
+    for (const item of treeItems) {
+      const title =
+        item.querySelector(".ant-tree-title") ||
+        item.querySelector("label.ant-radio-wrapper") ||
+        item.querySelector("label");
+      push(title?.textContent || item.textContent || "", item);
+    }
+
+    // 2) Fallback: radio labels in document order
+    if (ordered.length < 2) {
+      for (const el of root.querySelectorAll("label.ant-radio-wrapper, .ant-tree label")) {
+        push(el.textContent || "", el);
+      }
+    }
+
+    return ordered;
+  }
+
+  function scrapeDefinedStepsFromUi() {
+    const panel = document.querySelector('[data-testid="object-left-panel"]');
+    const instance = normalizeLabel(
+      document.querySelector('[data-testid="instance-name"]')?.textContent || ""
+    ).toLowerCase();
+
+    // Best source: Step instance panel with the full option array visible
+    if (panel && instance === "step") {
+      const fromPanel = scrapeOrderedStepOptions(panel);
+      if (fromPanel.length >= 2) return fromPanel;
+    }
+
+    for (const root of definedStepScrapeRoots()) {
+      const steps = scrapeOrderedStepOptions(root);
+      if (steps.length >= 2) return steps;
+    }
+    return panel ? scrapeOrderedStepOptions(panel) : [];
+  }
+
+  /** Last defined Step = last entry in the ordered ontology options array. */
+  function lastDefinedFromSteps(steps) {
+    if (!Array.isArray(steps) || !steps.length) return null;
+    return steps[steps.length - 1];
+  }
+
+  function activateStepClass() {
+    const name = [...document.querySelectorAll('[data-testid="ontology-item-name"]')].find(
+      (el) => normalizeLabel(el.textContent).toLowerCase() === "step"
+    );
+    if (name) {
+      const btn = name.closest('[role="button"]') || name.parentElement || name;
+      btn.click();
+      return "ontology-item-name";
+    }
+    const aria = [...document.querySelectorAll('[role="button"][aria-label]')].find((el) => {
+      if (isInTimelineChrome(el)) return false;
+      return /^step$/i.test(el.getAttribute("aria-label") || "");
+    });
+    if (aria) {
+      aria.click();
+      return "aria";
+    }
+    return null;
+  }
+
+  async function persistDefinedSteps(payload) {
+    try {
+      const stored = await chrome.storage.local.get(STORAGE_DEFINED_STEPS);
+      const map = stored[STORAGE_DEFINED_STEPS] && typeof stored[STORAGE_DEFINED_STEPS] === "object"
+        ? stored[STORAGE_DEFINED_STEPS]
+        : {};
+      map[payload.projectKey] = {
+        lastStepNum: payload.lastStepNum,
+        steps: payload.steps,
+        via: payload.via,
+        updatedAt: Date.now(),
+      };
+      await chrome.storage.local.set({ [STORAGE_DEFINED_STEPS]: map });
+    } catch {
+      /* ignore */
+    }
+  }
+
+  async function loadPersistedDefinedSteps(projectKey) {
+    try {
+      const stored = await chrome.storage.local.get(STORAGE_DEFINED_STEPS);
+      const map = stored[STORAGE_DEFINED_STEPS];
+      const hit = map?.[projectKey];
+      if (hit && Number.isFinite(Number(hit.lastStepNum)) && Number(hit.lastStepNum) >= 1) {
+        return {
+          projectKey,
+          lastStepNum: Number(hit.lastStepNum),
+          steps: Array.isArray(hit.steps) ? hit.steps : [],
+          via: hit.via || "storage",
+        };
+      }
+    } catch {
+      /* ignore */
+    }
+    return null;
+  }
+
+  /**
+   * Classes → Step: read ontology-defined Step options and cache the last id.
+   * Does not use timeline annotations (those only show what's drawn so far).
+   */
+  async function discoverDefinedSteps({ force = false } = {}) {
+    const projectKey = getProjectKey();
+    const liveNow = scrapeDefinedStepsFromUi();
+    const liveLast = lastDefinedFromSteps(liveNow);
+
+    if (
+      !force &&
+      definedStepsCache &&
+      definedStepsCache.projectKey === projectKey &&
+      definedStepsCache.lastStepNum >= 1 &&
+      (definedStepsCache.steps?.length || 0) >= 2 &&
+      !(
+        liveLast &&
+        (liveLast.stepNum > definedStepsCache.lastStepNum ||
+          liveNow.length > (definedStepsCache.steps?.length || 0))
+      )
+    ) {
+      return definedStepsCache;
+    }
+
+    if (discoveringSteps) {
+      for (let i = 0; i < 20; i += 1) {
+        await sleep(50);
+        if (!discoveringSteps && definedStepsCache?.projectKey === projectKey) {
+          return definedStepsCache;
+        }
+      }
+    }
+
+    discoveringSteps = true;
+    try {
+      // 1) Passive scrape — best when Step options panel is already open
+      let steps = liveNow.length >= 2 ? liveNow : scrapeDefinedStepsFromUi();
+      let via = liveNow.length >= 2 ? "passive-panel" : "passive";
+
+      // 2) Open Classes → Step when list looks incomplete
+      if (steps.length < 2) {
+        const activated = activateStepClass();
+        if (activated) {
+          await sleep(350);
+          steps = scrapeDefinedStepsFromUi();
+          via = "classes-step";
+          pressEditorKey("Escape");
+          await sleep(80);
+        }
+      }
+
+      // 3) Persist fuller live lists over a bad thin cache (e.g. last=2 when ontology has 4)
+      const persisted = await loadPersistedDefinedSteps(projectKey);
+      if (steps.length < 2) {
+        if (persisted && (persisted.steps?.length || 0) >= 2) {
+          definedStepsCache = persisted;
+          return definedStepsCache;
+        }
+        definedStepsCache = null;
+        return null;
+      }
+
+      const last = lastDefinedFromSteps(steps);
+      if (!last) {
+        definedStepsCache = null;
+        return null;
+      }
+      if (
+        persisted &&
+        (persisted.steps?.length || 0) > steps.length &&
+        persisted.lastStepNum > last.stepNum
+      ) {
+        definedStepsCache = persisted;
+        return definedStepsCache;
+      }
+
+      definedStepsCache = {
+        projectKey,
+        lastStepNum: last.stepNum,
+        steps,
+        via,
+      };
+      await persistDefinedSteps(definedStepsCache);
+      return definedStepsCache;
+    } finally {
+      discoveringSteps = false;
+    }
+  }
+
+  async function ensureDefinedLastStep() {
+    const projectKey = getProjectKey();
+    if (
+      definedStepsCache &&
+      definedStepsCache.projectKey === projectKey &&
+      definedStepsCache.lastStepNum >= 1
+    ) {
+      return definedStepsCache;
+    }
+    const persisted = await loadPersistedDefinedSteps(projectKey);
+    if (persisted) {
+      definedStepsCache = persisted;
+      // Refresh in background if possible
+      discoverDefinedSteps({ force: true }).catch(() => {});
+      return definedStepsCache;
+    }
+    return discoverDefinedSteps({ force: false });
+  }
+
+  function findLastStepRange() {
+    // Prefer ontology-defined last Step once known; else timeline max (manual/legacy).
+    if (
+      definedStepsCache &&
+      definedStepsCache.projectKey === getProjectKey() &&
+      definedStepsCache.lastStepNum >= 1
+    ) {
+      return findStepRangeByNum(definedStepsCache.lastStepNum);
+    }
+    return findLastTimelineStepRange();
   }
 
   function isGradeLabel(label) {
@@ -615,6 +920,42 @@
     return clickControlByText([/^done$/i, /^done\s*esc$/i], { root });
   }
 
+  /**
+   * After Grade bounds are set: blur Range start/end so grade hotkeys don't
+   * type into the frame fields. Keep the Grade instance selected.
+   */
+  async function blurRangeFrameInputs() {
+    try {
+      document.querySelector('input[aria-label="Range end"]')?.blur?.();
+      document.querySelector('input[aria-label="Range start"]')?.blur?.();
+      const active = document.activeElement;
+      if (
+        active &&
+        active.matches?.(
+          'input[aria-label="Range start"], input[aria-label="Range end"]'
+        )
+      ) {
+        active.blur?.();
+      }
+    } catch {
+      /* ignore */
+    }
+    // Focus a non-input chrome so the next keypress isn't captured by an input
+    const focusTarget =
+      document.querySelector('[data-testid="instance-name"]') ||
+      document.querySelector('[data-testid="object-left-panel"]') ||
+      document.querySelector('[data-testid="classification-timeline"]');
+    try {
+      if (focusTarget) {
+        if (focusTarget.tabIndex < 0) focusTarget.tabIndex = -1;
+        focusTarget.focus?.({ preventScroll: true });
+      }
+    } catch {
+      /* ignore */
+    }
+    await sleep(40);
+  }
+
   function actionsRoot() {
     return (
       document.querySelector('[data-testid="available-actions-panel"]') ||
@@ -821,8 +1162,9 @@
       }
 
       if (timelineMatches(wantStart, wantEnd)) {
-        clickDoneIfPresent();
-        await sleep(280);
+        // Do not Done/Escape — that would deselect Grade. Only leave frame inputs.
+        await blurRangeFrameInputs();
+        await sleep(80);
         if (timelineMatches(wantStart, wantEnd)) {
           return {
             ok: true,
@@ -831,6 +1173,7 @@
             want: { startFrame: wantStart, endFrame: wantEnd },
             written,
             attempts: attempt + 1,
+            framesBlurred: true,
           };
         }
       }
@@ -939,15 +1282,35 @@
 
   function snapshot() {
     const totalFrames = getTotalFrames();
-    const lastStep = findLastStepRange();
+    const defined = definedStepsCache?.projectKey === getProjectKey() ? definedStepsCache : null;
+    const lastDefinedNum = defined?.lastStepNum ?? null;
+    const lastStep = lastDefinedNum != null ? findStepRangeByNum(lastDefinedNum) : findLastTimelineStepRange();
+    const timelineMax = findLastTimelineStepRange();
     const grade = findPrimaryGradeRange();
-    if (!totalFrames || !lastStep) {
+    if (!totalFrames) {
       return {
         ready: false,
-        reason: !totalFrames ? "no-frames" : "no-last-step",
+        reason: "no-frames",
         totalFrames,
         lastStep: null,
         grade: null,
+        definedSteps: defined,
+      };
+    }
+    if (!lastStep) {
+      return {
+        ready: false,
+        reason:
+          lastDefinedNum != null
+            ? "last-defined-step-not-on-timeline"
+            : "no-last-step",
+        totalFrames,
+        lastStep: null,
+        grade: null,
+        definedSteps: defined,
+        timelineMaxStep: timelineMax
+          ? { stepNum: timelineMax.stepNum, endFrame: pctToFrame(timelineMax.end, totalFrames) }
+          : null,
       };
     }
     const targetEndPct = lastStep.end;
@@ -984,6 +1347,10 @@
       target: { startFrame: 0, endFrame: targetEndFrame, startPct: 0, endPct: targetEndPct },
       needsSync,
       gradeCount: listGradeRanges().length,
+      definedSteps: defined,
+      timelineMaxStep: timelineMax
+        ? { stepNum: timelineMax.stepNum, endFrame: pctToFrame(timelineMax.end, totalFrames) }
+        : null,
       key: `step${lastStep.stepNum}:${targetEndFrame}:${totalFrames}`,
     };
   }
@@ -993,6 +1360,27 @@
     if (syncing) return { ok: false, skipped: true, reason: "busy" };
     if (!location.pathname.includes("/label_editor/")) {
       return { ok: false, skipped: true, reason: "not-editor" };
+    }
+
+    // Auto path: require ontology last Step id, and that it exists on the timeline.
+    if (!force) {
+      const defined = await ensureDefinedLastStep();
+      if (!defined?.lastStepNum) {
+        return { ok: false, skipped: true, reason: "no-defined-steps" };
+      }
+      const onTimeline = findStepRangeByNum(defined.lastStepNum);
+      if (!onTimeline) {
+        return {
+          ok: false,
+          skipped: true,
+          reason: "waiting-for-last-defined-step",
+          wantStep: defined.lastStepNum,
+          timelineMax: findLastTimelineStepRange()?.stepNum ?? null,
+        };
+      }
+    } else {
+      // Manual sync: refresh defined steps so target prefers ontology last if present
+      await ensureDefinedLastStep();
     }
 
     const snap = snapshot();
@@ -1056,6 +1444,8 @@
         }
         const after = snapshot();
         lastAppliedKey = snap.key;
+        // Grade stays selected; blur frame inputs so grade hotkeys work
+        await blurRangeFrameInputs();
         if (!quiet) {
           const msg = ensured.created
             ? `Grade created 0–${endFrame} (step ${snap.lastStep.stepNum})`
@@ -1086,12 +1476,17 @@
     }
   }
 
-  /** After Step edit → Escape/Done, fit Grade (workflow trigger). */
+  /** After Step edit → Escape/Done, fit Grade only if ontology last Step is on the timeline. */
   function scheduleWorkflowSync() {
     if (!enabled || syncing) return;
     clearTimeout(debounceTimer);
     debounceTimer = setTimeout(() => {
-      syncGrade({ quiet: false }).catch(() => {});
+      (async () => {
+        const defined = await ensureDefinedLastStep();
+        if (!defined?.lastStepNum) return;
+        if (!findStepRangeByNum(defined.lastStepNum)) return;
+        await syncGrade({ quiet: false });
+      })().catch(() => {});
     }, WORKFLOW_DEBOUNCE_MS);
   }
 
@@ -1099,13 +1494,20 @@
     try {
       const stored = await chrome.storage.local.get(STORAGE_ENABLED);
       if (typeof stored[STORAGE_ENABLED] === "boolean") enabled = stored[STORAGE_ENABLED];
-      else enabled = true; // on by default — Escape/Done after last Step
+      else enabled = true; // on by default — Escape/Done after last *defined* Step
     } catch {
       enabled = true;
     }
   }
 
   function startWatch() {
+    // Discover Classes → Step list once the editor is up (non-blocking)
+    setTimeout(() => {
+      if (location.pathname.includes("/label_editor/")) {
+        discoverDefinedSteps({ force: false }).catch(() => {});
+      }
+    }, 1200);
+
     // Trusted Escape = Done on instance panel (your step workflow)
     document.addEventListener(
       "keyup",
@@ -1147,12 +1549,14 @@
       return true;
     }
     if (message?.type === "GRADE_SYNC_STATUS") {
-      loadEnabled().then(() => {
+      loadEnabled().then(async () => {
+        await ensureDefinedLastStep();
         sendResponse({
           ok: true,
           version: VERSION,
           enabled,
           snapshot: snapshot(),
+          definedSteps: definedStepsCache,
           lastAppliedKey,
         });
       });
@@ -1166,6 +1570,12 @@
       });
       return true;
     }
+    if (message?.type === "GRADE_DISCOVER_STEPS") {
+      discoverDefinedSteps({ force: true })
+        .then((defined) => sendResponse({ ok: !!defined, defined }))
+        .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
+      return true;
+    }
     return false;
   });
 
@@ -1173,6 +1583,8 @@
     version: VERSION,
     snapshot,
     syncGrade,
+    discoverDefinedSteps,
+    ensureDefinedLastStep,
   };
 
   loadEnabled().then(startWatch);

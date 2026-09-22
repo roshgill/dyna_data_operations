@@ -63,27 +63,37 @@ async function refreshGradeStatus() {
       return;
     }
     autoGradeEl.checked = result.enabled !== false;
+    const defined = result.definedSteps || result.snapshot?.definedSteps;
+    const definedLabel =
+      defined?.lastStepNum != null ? `Defined last Step: ${defined.lastStepNum}. ` : "";
     const snap = result.snapshot;
     if (!snap?.ready) {
-      gradeStatusEl.textContent =
-        snap?.reason === "no-last-step"
-          ? "Waiting for the last Step on the timeline…"
-          : "Waiting for timeline…";
+      if (snap?.reason === "last-defined-step-not-on-timeline") {
+        gradeStatusEl.textContent = `${definedLabel}Waiting for Step ${defined?.lastStepNum} on the timeline…`;
+        return;
+      }
+      if (snap?.reason === "no-last-step" || snap?.reason === "no-defined-steps") {
+        gradeStatusEl.textContent = definedLabel
+          ? `${definedLabel}Waiting for that Step on the timeline…`
+          : "Discovering Classes → Step list…";
+        return;
+      }
+      gradeStatusEl.textContent = "Waiting for timeline…";
       return;
     }
     const step = snap.lastStep;
     const grade = snap.grade;
     if (!grade) {
-      gradeStatusEl.textContent = `Step ${step.stepNum} ends at frame ${step.endFrame}. Open/create a trajectory instance, then Sync (uses Range start/end).`;
+      gradeStatusEl.textContent = `${definedLabel}Step ${step.stepNum} ends at frame ${step.endFrame}. Sync uses Range start/end.`;
       return;
     }
     if ((grade.span ?? grade.endFrame - grade.startFrame) <= 2) {
-      gradeStatusEl.textContent = `Step ${step.stepNum} → 0–${step.endFrame}. Tiny Grade pin — Sync will type Range start/end.`;
+      gradeStatusEl.textContent = `${definedLabel}Step ${step.stepNum} → 0–${step.endFrame}. Tiny Grade pin — Sync will expand it.`;
       return;
     }
     gradeStatusEl.textContent = snap.needsSync
-      ? `Step ${step.stepNum} → 0–${step.endFrame}. Grade is ${grade.startFrame}–${grade.endFrame} (will sync).`
-      : `Synced: Grade 0–${grade.endFrame} matches step ${step.stepNum}.`;
+      ? `${definedLabel}Step ${step.stepNum} → 0–${step.endFrame}. Grade is ${grade.startFrame}–${grade.endFrame} (will sync).`
+      : `${definedLabel}Synced: Grade 0–${grade.endFrame} matches step ${step.stepNum}.`;
   } catch (err) {
     gradeStatusEl.textContent = err.message || String(err);
   }

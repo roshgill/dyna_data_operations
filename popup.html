@@ -23,12 +23,12 @@
       <section class="dev-tools">
         <p class="meta">[ AUTO GRADE ]</p>
         <p class="hint compact">
-          After you finish the last Step (set outcome → Escape / Done), Auto-fit creates Grade
-          0 → that Step’s end. Keep Sync Grade now for a manual pass.
+          Auto-fit runs only after the <em>last defined</em> Step (from Classes → Step) is
+          annotated on the timeline, then Escape / Done. Sync Grade now still forces a pass.
         </p>
         <label class="toggle-row">
           <input id="auto-grade" type="checkbox" checked />
-          <span>Auto-fit Grade after Step Escape/Done</span>
+          <span>Auto-fit Grade after last defined Step</span>
         </label>
         <p id="grade-status" class="hint compact" aria-live="polite"></p>
         <div class="actions">
