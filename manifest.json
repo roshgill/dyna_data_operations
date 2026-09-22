@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Dyna Ops: Encord Camera Layout",
-  "version": "0.9.0",
-  "description": "Adjust your camera layout once and restore it with a click, for each episode.",
+  "version": "0.14.9",
+  "description": "Restore Encord camera layouts and auto-fit Grade trajectory to the last Step.",
   "permissions": ["storage", "activeTab", "scripting", "contextMenus"],
   "host_permissions": [
     "https://app.encord.com/*",
@@ -32,7 +32,7 @@
         "https://app.encord.com/*",
         "https://app.us.encord.com/*"
       ],
-      "js": ["content.js"],
+      "js": ["content.js", "trajectory-sync.js"],
       "run_at": "document_idle"
     }
   ],

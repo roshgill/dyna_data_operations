@@ -79,6 +79,53 @@ h1 {
   gap: 8px;
 }
 
+.dev-tools {
+  margin-top: 22px;
+  padding-top: 16px;
+  border-top: 1px dotted var(--border);
+  display: grid;
+  gap: 8px;
+}
+
+.dev-tools .meta {
+  margin: 0;
+}
+
+.hint.compact {
+  margin: 0;
+  font-size: 12px;
+}
+
+.toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--fg);
+  cursor: pointer;
+}
+
+.toggle-row input {
+  width: 14px;
+  height: 14px;
+  accent-color: #1a1a1a;
+}
+
+.scan-out {
+  width: 100%;
+  min-height: 160px;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--bg-elevated);
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.4;
+  resize: vertical;
+}
+
 button {
   appearance: none;
   display: inline-flex;
