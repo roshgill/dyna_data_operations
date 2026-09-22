@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Dyna Ops: Encord Camera Layout",
-  "version": "0.14.11",
-  "description": "Restore Encord camera layouts and auto-fit Grade trajectory to the last Step.",
+  "version": "0.16.0",
+  "description": "Restore Encord camera layouts (manual or auto on load) and auto-fit Grade to the last Step.",
   "permissions": ["storage", "activeTab", "scripting", "contextMenus"],
   "host_permissions": [
     "https://app.encord.com/*",
