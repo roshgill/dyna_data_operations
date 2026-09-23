@@ -1,5 +1,5 @@
 (() => {
-  const VERSION = "0.14.9";
+  const VERSION = "0.16.0";
   const STORAGE_KEY = "preferredCameras";
   const LAYOUT_KEY = "preferredMosaicLayout";
   const PREFERRED_ACTIVE_TILE = "cam_high";
@@ -1330,6 +1330,23 @@
 
   // Capture episode default early; warn only when that default differs from last saved default.
   let mismatchTimer = null;
+  let autoLayoutTimer = null;
+  let autoLayoutDoneKey = "";
+  let autoLayoutInFlight = false;
+
+  function episodeLayoutKey() {
+    try {
+      return new URL(location.href).pathname;
+    } catch {
+      return location.href;
+    }
+  }
+
+  function mosaicLooksReady() {
+    const tiles = document.querySelectorAll('[data-testid="tile-display-name"]').length;
+    const windows = document.querySelectorAll(".mosaic-window").length;
+    return tiles >= 1 && windows >= 1;
+  }
 
   function scheduleEpisodeWatch() {
     clearTimeout(mismatchTimer);
@@ -1341,14 +1358,44 @@
     }, 1000);
   }
 
+  function scheduleAutoLayout() {
+    clearTimeout(autoLayoutTimer);
+    autoLayoutTimer = setTimeout(() => {
+      if (!mosaicLooksReady()) return;
+      const key = episodeLayoutKey();
+      if (autoLayoutDoneKey === key) return;
+
+      chrome.storage.local.get(["autoLayoutEnabled", "preferredMosaicLayout"], (stored) => {
+        if (chrome.runtime.lastError) return;
+        if (stored.autoLayoutEnabled !== true) return;
+        if (!stored.preferredMosaicLayout?.tree) return;
+        if (autoLayoutDoneKey === key || autoLayoutInFlight) return;
+
+        autoLayoutInFlight = true;
+        chrome.runtime
+          .sendMessage({ type: "TRY_AUTO_LAYOUT" })
+          .then((result) => {
+            // Mark done on success or intentional block (wrong camera set) — retry on hard errors.
+            if (result?.ok || result?.blocked) autoLayoutDoneKey = key;
+          })
+          .catch(() => {})
+          .finally(() => {
+            autoLayoutInFlight = false;
+          });
+      });
+    }, 1800);
+  }
+
   if (!window.__encordLayoutMismatchWatch) {
     window.__encordLayoutMismatchWatch = true;
     let lastHref = location.href;
     setInterval(() => {
       if (location.href !== lastHref) {
         lastHref = location.href;
+        autoLayoutDoneKey = "";
         chrome.runtime.sendMessage({ type: "CLEAR_EPISODE_DEFAULT" }).catch(() => {});
         scheduleEpisodeWatch();
+        scheduleAutoLayout();
       }
     }, 1000);
 
@@ -1360,6 +1407,7 @@
       if (hint === lastLeafHint) return;
       lastLeafHint = hint;
       scheduleEpisodeWatch();
+      scheduleAutoLayout();
     });
     mo.observe(document.documentElement, { childList: true, subtree: true });
 
@@ -1368,11 +1416,19 @@
       if (changes.savedDefaultLeaves || changes.preferredMosaicLayout) {
         scheduleEpisodeWatch();
       }
+      if (changes.autoLayoutEnabled?.newValue === true) {
+        autoLayoutDoneKey = "";
+        scheduleAutoLayout();
+      }
     });
 
     scheduleEpisodeWatch();
+    scheduleAutoLayout();
     setTimeout(scheduleEpisodeWatch, 2000);
+    setTimeout(scheduleAutoLayout, 2000);
     setTimeout(scheduleEpisodeWatch, 4500);
+    setTimeout(scheduleAutoLayout, 4500);
     setTimeout(scheduleEpisodeWatch, 8000);
+    setTimeout(scheduleAutoLayout, 8000);
   }
 })();

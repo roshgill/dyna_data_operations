@@ -87,6 +87,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   (async () => {
     if (message?.type === "OPS_RESTORE") return LayoutOps.restore(message.tab);
     if (message?.type === "OPS_SAVE") return LayoutOps.save(message.tab);
+    if (message?.type === "TRY_AUTO_LAYOUT") {
+      const tab = message.tab || sender.tab;
+      return LayoutOps.tryAutoLayout(tab);
+    }
     if (message?.type === "CHECK_LAYOUT_MISMATCH") {
       const tab = message.tab || sender.tab;
       return LayoutOps.checkMismatch(tab);

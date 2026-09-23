@@ -5,6 +5,7 @@ const scanBtn = document.getElementById("scan");
 const scanFullBtn = document.getElementById("scan-full");
 const copyScanBtn = document.getElementById("copy-scan");
 const scanOut = document.getElementById("scan-out");
+const autoLayoutEl = document.getElementById("auto-layout");
 const autoGradeEl = document.getElementById("auto-grade");
 const gradeStatusEl = document.getElementById("grade-status");
 const gradeSyncBtn = document.getElementById("grade-sync");
@@ -53,6 +54,14 @@ async function refreshStatus() {
     return;
   }
   setStatus("No camera layout saved yet. Adjust your cameras, then save.");
+}
+
+async function refreshAutoLayoutToggle() {
+  try {
+    autoLayoutEl.checked = await LayoutOps.getAutoLayoutEnabled();
+  } catch {
+    autoLayoutEl.checked = false;
+  }
 }
 
 async function refreshGradeStatus() {
@@ -124,6 +133,15 @@ restoreBtn.addEventListener("click", async () => {
     setStatus(err.message || String(err));
   } finally {
     setBusy(false);
+  }
+});
+
+autoLayoutEl.addEventListener("change", async () => {
+  try {
+    await LayoutOps.setAutoLayoutEnabled(autoLayoutEl.checked);
+    setStatus(autoLayoutEl.checked ? "Auto layout on." : "Auto layout off.");
+  } catch (err) {
+    setStatus(err.message || String(err));
   }
 });
 
@@ -199,4 +217,5 @@ copyScanBtn.addEventListener("click", async () => {
 });
 
 refreshStatus();
+refreshAutoLayoutToggle();
 refreshGradeStatus();

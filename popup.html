@@ -21,10 +21,19 @@
       </div>
 
       <section class="dev-tools">
+        <p class="meta">[ AUTO LAYOUT ]</p>
+        <label class="switch-row">
+          <input id="auto-layout" type="checkbox" role="switch" />
+          <span class="switch" aria-hidden="true"></span>
+          <span>Auto-layout after page loads</span>
+        </label>
+      </section>
+
+      <section class="dev-tools">
         <p class="meta">[ AUTO GRADE ]</p>
         <p class="hint compact">
-          Auto-fit runs only after the <em>last defined</em> Step (from Classes → Step) is
-          annotated on the timeline, then Escape / Done. Sync Grade now still forces a pass.
+          Auto-fit runs after the last defined Step is on the timeline (Escape / Done),
+          and again if that Step’s end is adjusted. Sync Grade now still forces a pass.
         </p>
         <label class="toggle-row">
           <input id="auto-grade" type="checkbox" checked />
@@ -52,7 +61,7 @@
       </section>
 
       <footer class="foot">
-        <span class="meta">v0.10.0</span>
+        <span class="meta">v0.16.0</span>
       </footer>
     </main>
     <script src="layout-ops.js"></script>

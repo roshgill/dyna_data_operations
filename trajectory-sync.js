@@ -2,21 +2,26 @@
 // Write path: Encord classification UI (frame jump + C/V/M or Range start/end inputs).
 // No timeline draw-drag / alt-click / shift-click (those create single-frame pins).
 (() => {
-  const VERSION = "0.14.9-grade";
+  const VERSION = "0.14.11-grade";
   const STORAGE_ENABLED = "autoGradeEnabled";
   // v2 key — invalidates bad caches that stored lastStepNum=2 from truncated scrapes
   const STORAGE_DEFINED_STEPS = "gradeSyncDefinedStepsV2";
   const PCT_EPS = 0.4;
-  const FRAME_EPS = 1;
+  const FRAME_EPS = 1; // playhead / goto verification only
+  const BOUND_EPS = 0; // Grade vs Step end — 1 frame is a real change, not noise
   const WORKFLOW_DEBOUNCE_MS = 550;
+  const LAST_STEP_RESIZE_DEBOUNCE_MS = 450;
 
   if (window.__encordGradeSync?.version === VERSION) return;
 
   let enabled = true;
   let syncing = false;
   let debounceTimer = null;
+  let lastStepResizeTimer = null;
   let lastToastKey = "";
   let lastAppliedKey = "";
+  let lastObservedStepEndKey = "";
+  let stepRowObserver = null;
   /** @type {{ projectKey: string, lastStepNum: number, steps: { stepNum: number, label: string }[], via: string } | null} */
   let definedStepsCache = null;
   let discoveringSteps = false;
@@ -1027,8 +1032,8 @@
     const t = timelineBounds();
     if (!t) return false;
     return (
-      Math.abs(t.startFrame - wantStart) <= FRAME_EPS + 1 &&
-      Math.abs(t.endFrame - wantEnd) <= FRAME_EPS + 1
+      Math.abs(t.startFrame - wantStart) <= BOUND_EPS &&
+      Math.abs(t.endFrame - wantEnd) <= BOUND_EPS
     );
   }
 
@@ -1109,11 +1114,11 @@
       let geo = timelineBounds();
 
       // 1) Expand pin → real range via Fill (inputs alone do not grow a pin)
-      if (!geo || geo.span <= 2 || Math.abs(geo.startFrame - wantStart) > FRAME_EPS + 1) {
+      if (!geo || geo.span <= 2 || Math.abs(geo.startFrame - wantStart) > BOUND_EPS) {
         await fillAt(wantStart);
         geo = timelineBounds();
       }
-      if (!geo || geo.endFrame < wantEnd - 1) {
+      if (!geo || geo.endFrame < wantEnd) {
         await fillAt(wantEnd);
         geo = timelineBounds();
       }
@@ -1153,7 +1158,7 @@
 
       // 4) Last resort: if end still high, Fill can't shrink — keep Adjust end down
       geo = timelineBounds();
-      if (geo && geo.endFrame > wantEnd + 1 && geo.endFrame - wantEnd <= 60) {
+      if (geo && geo.endFrame > wantEnd && geo.endFrame - wantEnd <= 60) {
         await selectGrade();
         adjustRightSide(wantEnd - geo.endFrame);
         await sleep(150);
@@ -1322,8 +1327,8 @@
     const needsSync =
       !grade ||
       gradeSpan <= 2 ||
-      Math.abs((gradeStartFrame ?? -1) - 0) > FRAME_EPS ||
-      Math.abs((gradeEndFrame ?? -1) - targetEndFrame) > FRAME_EPS;
+      Math.abs((gradeStartFrame ?? -1) - 0) > BOUND_EPS ||
+      Math.abs((gradeEndFrame ?? -1) - targetEndFrame) > BOUND_EPS;
 
     return {
       ready: true,
@@ -1414,13 +1419,13 @@
         const playhead = getCurrentFrame();
         const endOk =
           check.grade &&
-          Math.abs((check.grade.endFrame ?? -1) - endFrame) <= FRAME_EPS + 1;
-        const startOk = check.grade && Math.abs((check.grade.startFrame ?? -1) - 0) <= FRAME_EPS;
+          Math.abs((check.grade.endFrame ?? -1) - endFrame) <= BOUND_EPS;
+        const startOk = check.grade && Math.abs((check.grade.startFrame ?? -1) - 0) <= BOUND_EPS;
         const endIsPlayhead =
           playhead != null &&
           check.grade &&
-          Math.abs((check.grade.endFrame ?? -1) - playhead) <= FRAME_EPS &&
-          Math.abs(endFrame - playhead) > FRAME_EPS;
+          Math.abs((check.grade.endFrame ?? -1) - playhead) <= BOUND_EPS &&
+          Math.abs(endFrame - playhead) > BOUND_EPS;
 
         if (!startOk || !endOk || endIsPlayhead) {
           const retry = await resizeViaRangeInputs(0, endFrame);
@@ -1428,8 +1433,8 @@
           const retryOk =
             retry.ok &&
             afterRetry.grade &&
-            Math.abs((afterRetry.grade.startFrame ?? -1) - 0) <= FRAME_EPS &&
-            Math.abs((afterRetry.grade.endFrame ?? -1) - endFrame) <= FRAME_EPS + 1;
+            Math.abs((afterRetry.grade.startFrame ?? -1) - 0) <= BOUND_EPS &&
+            Math.abs((afterRetry.grade.endFrame ?? -1) - endFrame) <= BOUND_EPS;
           if (!retryOk) {
             return {
               ok: false,
@@ -1490,6 +1495,74 @@
     }, WORKFLOW_DEBOUNCE_MS);
   }
 
+  /**
+   * When the last defined Step's end moves on the timeline (e.g. drag ±1 frame),
+   * re-fit Grade to match — without waiting for Escape/Done.
+   */
+  function scheduleLastStepResizeSync() {
+    if (!enabled || syncing) return;
+    clearTimeout(lastStepResizeTimer);
+    lastStepResizeTimer = setTimeout(() => {
+      (async () => {
+        const defined = await ensureDefinedLastStep();
+        if (!defined?.lastStepNum) return;
+        const lastRange = findStepRangeByNum(defined.lastStepNum);
+        if (!lastRange) return;
+
+        const total = getTotalFrames();
+        if (!total) return;
+        const endFrame = pctToFrame(lastRange.end, total);
+        const endKey = `step${defined.lastStepNum}:${endFrame}:${total}`;
+
+        // Still settling / unchanged
+        if (endKey === lastObservedStepEndKey && endKey === lastAppliedKey) return;
+
+        const grade = findPrimaryGradeRange();
+        // Only auto-refit when Grade already exists (creation stays Escape/Done gated)
+        if (!grade) {
+          lastObservedStepEndKey = endKey;
+          return;
+        }
+
+        const gradeEnd = pctToFrame(grade.end, total);
+        const gradeStart = pctToFrame(grade.left, total);
+        const already =
+          Math.abs(gradeStart - 0) <= BOUND_EPS &&
+          Math.abs(gradeEnd - endFrame) <= BOUND_EPS;
+        lastObservedStepEndKey = endKey;
+        if (already) return;
+
+        await syncGrade({ quiet: true });
+      })().catch(() => {});
+    }, LAST_STEP_RESIZE_DEBOUNCE_MS);
+  }
+
+  function ensureStepRowObserver() {
+    if (stepRowObserver) return;
+    const attach = () => {
+      const row = document.querySelector('[data-testid="row-step"]');
+      if (!row || row.dataset.encordGradeStepWatch === "1") return !!row;
+      row.dataset.encordGradeStepWatch = "1";
+      stepRowObserver = new MutationObserver(() => {
+        scheduleLastStepResizeSync();
+      });
+      stepRowObserver.observe(row, {
+        attributes: true,
+        subtree: true,
+        attributeFilter: ["style", "class"],
+        childList: true,
+      });
+      return true;
+    };
+    if (attach()) return;
+    // Timeline may mount later
+    const boot = new MutationObserver(() => {
+      if (attach()) boot.disconnect();
+    });
+    boot.observe(document.documentElement, { childList: true, subtree: true });
+    setTimeout(() => boot.disconnect(), 60000);
+  }
+
   async function loadEnabled() {
     try {
       const stored = await chrome.storage.local.get(STORAGE_ENABLED);
@@ -1505,6 +1578,7 @@
     setTimeout(() => {
       if (location.pathname.includes("/label_editor/")) {
         discoverDefinedSteps({ force: false }).catch(() => {});
+        ensureStepRowObserver();
       }
     }, 1200);
 
@@ -1531,6 +1605,38 @@
         const t = normalizeLabel(btn.textContent || "");
         if (!/^done\b/i.test(t) && !/^done\s*esc$/i.test(t)) return;
         scheduleWorkflowSync();
+      },
+      true
+    );
+
+    // Dragging step handles / releasing after ±1 frame adjust
+    document.addEventListener(
+      "pointerup",
+      (event) => {
+        if (!event.isTrusted) return;
+        if (!location.pathname.includes("/label_editor/")) return;
+        if (!event.target?.closest?.('[data-testid="row-step"], [data-testid="classification-timeline"]')) {
+          return;
+        }
+        scheduleLastStepResizeSync();
+      },
+      true
+    );
+
+    // Editing last Step via Range end input then blur/Enter
+    document.addEventListener(
+      "change",
+      (event) => {
+        if (!event.isTrusted) return;
+        const input = event.target;
+        if (!(input instanceof HTMLInputElement)) return;
+        const aria = input.getAttribute("aria-label") || "";
+        if (aria !== "Range end" && aria !== "Range start") return;
+        const instance = normalizeLabel(
+          document.querySelector('[data-testid="instance-name"]')?.textContent || ""
+        ).toLowerCase();
+        if (instance !== "step") return;
+        scheduleLastStepResizeSync();
       },
       true
     );

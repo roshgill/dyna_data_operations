@@ -420,6 +420,28 @@ const LayoutOps = (() => {
     return { ok: true, enabled: !!enabled };
   }
 
+  async function getAutoLayoutEnabled() {
+    const stored = await chrome.storage.local.get("autoLayoutEnabled");
+    return stored.autoLayoutEnabled === true;
+  }
+
+  async function setAutoLayoutEnabled(enabled) {
+    await chrome.storage.local.set({ autoLayoutEnabled: !!enabled });
+    return { ok: true, enabled: !!enabled };
+  }
+
+  /** Restore saved layout if auto-layout is on (used after episode render). */
+  async function tryAutoLayout(tab) {
+    const enabled = await getAutoLayoutEnabled();
+    if (!enabled) return { ok: true, skipped: true, reason: "disabled" };
+
+    const stored = await chrome.storage.local.get("preferredMosaicLayout");
+    const layout = stored.preferredMosaicLayout;
+    if (!layout?.tree) return { ok: true, skipped: true, reason: "no-layout" };
+
+    return restore(tab);
+  }
+
   return {
     isEncordUrl,
     getActiveTab,
@@ -432,6 +454,9 @@ const LayoutOps = (() => {
     gradeStatus,
     gradeSyncNow,
     setGradeEnabled,
+    getAutoLayoutEnabled,
+    setAutoLayoutEnabled,
+    tryAutoLayout,
     checkMismatch,
     lockEpisodeDefault,
     clearEpisodeDefault,
