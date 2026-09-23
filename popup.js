@@ -6,8 +6,6 @@ const scanFullBtn = document.getElementById("scan-full");
 const copyScanBtn = document.getElementById("copy-scan");
 const scanOut = document.getElementById("scan-out");
 const autoLayoutEl = document.getElementById("auto-layout");
-const autoLayoutStatusEl = document.getElementById("auto-layout-status");
-const autoLayoutApplyBtn = document.getElementById("auto-layout-apply");
 const autoGradeEl = document.getElementById("auto-grade");
 const gradeStatusEl = document.getElementById("grade-status");
 const gradeSyncBtn = document.getElementById("grade-sync");
@@ -38,7 +36,6 @@ function setBusy(busy) {
   restoreBtn.disabled = busy;
   scanBtn.disabled = busy;
   scanFullBtn.disabled = busy;
-  autoLayoutApplyBtn.disabled = busy;
   gradeSyncBtn.disabled = busy;
 }
 
@@ -59,20 +56,11 @@ async function refreshStatus() {
   setStatus("No camera layout saved yet. Adjust your cameras, then save.");
 }
 
-async function refreshAutoLayoutStatus() {
+async function refreshAutoLayoutToggle() {
   try {
-    const enabled = await LayoutOps.getAutoLayoutEnabled();
-    autoLayoutEl.checked = enabled;
-    const { preferredMosaicLayout } = await chrome.storage.local.get("preferredMosaicLayout");
-    if (!preferredMosaicLayout?.tree) {
-      autoLayoutStatusEl.textContent = "No saved layout yet — Save layout first.";
-      return;
-    }
-    autoLayoutStatusEl.textContent = enabled
-      ? "On — will restore after the viewer loads."
-      : "Off — use Restore / Apply layout now.";
-  } catch (err) {
-    autoLayoutStatusEl.textContent = err.message || String(err);
+    autoLayoutEl.checked = await LayoutOps.getAutoLayoutEnabled();
+  } catch {
+    autoLayoutEl.checked = false;
   }
 }
 
@@ -152,23 +140,8 @@ autoLayoutEl.addEventListener("change", async () => {
   try {
     await LayoutOps.setAutoLayoutEnabled(autoLayoutEl.checked);
     setStatus(autoLayoutEl.checked ? "Auto layout on." : "Auto layout off.");
-    await refreshAutoLayoutStatus();
   } catch (err) {
     setStatus(err.message || String(err));
-  }
-});
-
-autoLayoutApplyBtn.addEventListener("click", async () => {
-  setBusy(true);
-  setStatus("Applying layout…");
-  try {
-    const result = await LayoutOps.restore(await resolveTargetTab());
-    if (!result?.ok) throw new Error(result?.error || "Apply failed.");
-    setStatus("Cameras adjusted");
-  } catch (err) {
-    setStatus(err.message || String(err));
-  } finally {
-    setBusy(false);
   }
 });
 
@@ -244,5 +217,5 @@ copyScanBtn.addEventListener("click", async () => {
 });
 
 refreshStatus();
-refreshAutoLayoutStatus();
+refreshAutoLayoutToggle();
 refreshGradeStatus();

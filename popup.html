@@ -22,18 +22,11 @@
 
       <section class="dev-tools">
         <p class="meta">[ AUTO LAYOUT ]</p>
-        <p class="hint compact">
-          When on, restores your saved camera layout after the episode viewer finishes
-          loading. Apply layout now runs the same restore manually.
-        </p>
-        <label class="toggle-row">
-          <input id="auto-layout" type="checkbox" />
+        <label class="switch-row">
+          <input id="auto-layout" type="checkbox" role="switch" />
+          <span class="switch" aria-hidden="true"></span>
           <span>Auto-layout after page loads</span>
         </label>
-        <p id="auto-layout-status" class="hint compact" aria-live="polite"></p>
-        <div class="actions">
-          <button id="auto-layout-apply" type="button">Apply layout now</button>
-        </div>
       </section>
 
       <section class="dev-tools">
