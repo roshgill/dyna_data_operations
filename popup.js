@@ -56,6 +56,7 @@ async function refreshStatus() {
   setStatus("No camera layout saved yet. Adjust your cameras, then save.");
 }
 
+
 async function refreshAutoLayoutToggle() {
   try {
     autoLayoutEl.checked = await LayoutOps.getAutoLayoutEnabled();
@@ -73,17 +74,15 @@ async function refreshGradeStatus() {
     }
     autoGradeEl.checked = result.enabled !== false;
     const defined = result.definedSteps || result.snapshot?.definedSteps;
-    const definedLabel =
-      defined?.lastStepNum != null ? `Defined last Step: ${defined.lastStepNum}. ` : "";
     const snap = result.snapshot;
     if (!snap?.ready) {
       if (snap?.reason === "last-defined-step-not-on-timeline") {
-        gradeStatusEl.textContent = `${definedLabel}Waiting for Step ${defined?.lastStepNum} on the timeline…`;
+        gradeStatusEl.textContent = `Waiting for Step ${defined?.lastStepNum} on the timeline…`;
         return;
       }
       if (snap?.reason === "no-last-step" || snap?.reason === "no-defined-steps") {
-        gradeStatusEl.textContent = definedLabel
-          ? `${definedLabel}Waiting for that Step on the timeline…`
+        gradeStatusEl.textContent = defined?.lastStepNum
+          ? "Waiting for that Step on the timeline…"
           : "Discovering Classes → Step list…";
         return;
       }
@@ -93,16 +92,16 @@ async function refreshGradeStatus() {
     const step = snap.lastStep;
     const grade = snap.grade;
     if (!grade) {
-      gradeStatusEl.textContent = `${definedLabel}Step ${step.stepNum} ends at frame ${step.endFrame}. Sync uses Range start/end.`;
+      gradeStatusEl.textContent = `Step ${step.stepNum} ends at frame ${step.endFrame}. Sync uses Range start/end.`;
       return;
     }
     if ((grade.span ?? grade.endFrame - grade.startFrame) <= 2) {
-      gradeStatusEl.textContent = `${definedLabel}Step ${step.stepNum} → 0–${step.endFrame}. Tiny Grade pin — Sync will expand it.`;
+      gradeStatusEl.textContent = `Step ${step.stepNum} → 0–${step.endFrame}. Tiny Grade pin — Sync will expand it.`;
       return;
     }
     gradeStatusEl.textContent = snap.needsSync
-      ? `${definedLabel}Step ${step.stepNum} → 0–${step.endFrame}. Grade is ${grade.startFrame}–${grade.endFrame} (will sync).`
-      : `${definedLabel}Synced: Grade 0–${grade.endFrame} matches step ${step.stepNum}.`;
+      ? `Step ${step.stepNum} → 0–${step.endFrame}. Grade is ${grade.startFrame}–${grade.endFrame} (will sync).`
+      : `Synced: Grade 0–${grade.endFrame} matches step ${step.stepNum}.`;
   } catch (err) {
     gradeStatusEl.textContent = err.message || String(err);
   }
@@ -135,6 +134,7 @@ restoreBtn.addEventListener("click", async () => {
     setBusy(false);
   }
 });
+
 
 autoLayoutEl.addEventListener("change", async () => {
   try {

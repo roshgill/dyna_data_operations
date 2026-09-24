@@ -1,5 +1,5 @@
 (() => {
-  const VERSION = "0.16.0";
+  const VERSION = "0.18.1";
   const STORAGE_KEY = "preferredCameras";
   const LAYOUT_KEY = "preferredMosaicLayout";
   const PREFERRED_ACTIVE_TILE = "cam_high";
@@ -14,6 +14,19 @@
 
   function normalizeLabel(text) {
     return (text || "").replace(/\s+/g, " ").trim();
+  }
+
+  /** Match data-testid exactly, then case-insensitively (Encord: row-Step vs row-step). */
+  function findByTestId(testId) {
+    const exact = document.querySelector(`[data-testid="${testId}"]`);
+    if (exact) return exact;
+    const want = String(testId || "").toLowerCase();
+    if (!want) return null;
+    return (
+      [...document.querySelectorAll("[data-testid]")].find(
+        (el) => (el.getAttribute("data-testid") || "").toLowerCase() === want
+      ) || null
+    );
   }
 
   function isVisible(el) {
@@ -900,8 +913,8 @@
       currentFrame: currentFrame ? normalizeLabel(currentFrame.textContent) : null,
       totalFrames: totalFrames ? normalizeLabel(totalFrames.textContent) : null,
       frameInputValue: frameInput instanceof HTMLInputElement ? frameInput.value : null,
-      rowTrajectory: dumpSubtree(document.querySelector('[data-testid="row-trajectory"]')),
-      rowStep: dumpSubtree(document.querySelector('[data-testid="row-step"]')),
+      rowTrajectory: dumpSubtree(findByTestId("row-trajectory")),
+      rowStep: dumpSubtree(findByTestId("row-step")),
       classificationTimeline: dumpSubtree(
         document.querySelector('[data-testid="classification-timeline"]'),
         { maxNodes: 120, htmlMax: 3500 }
@@ -927,8 +940,8 @@
     // Every data-testid under timeline rows (even empty)
     const rowTestIds = [];
     for (const root of [
-      document.querySelector('[data-testid="row-trajectory"]'),
-      document.querySelector('[data-testid="row-step"]'),
+      findByTestId("row-trajectory"),
+      findByTestId("row-step"),
       document.querySelector('[data-testid="classification-timeline"]'),
     ]) {
       if (!root) continue;
@@ -1130,8 +1143,8 @@
       ["editor-sider-bottom-pane", document.querySelector('[data-testid="editor-sider-bottom-pane"]')],
       ["classification-timeline", document.querySelector('[data-testid="classification-timeline"]')],
       ["scrollable-timeline-id", document.querySelector('[data-testid="scrollable-timeline-id"]')],
-      ["row-trajectory", document.querySelector('[data-testid="row-trajectory"]')],
-      ["row-step", document.querySelector('[data-testid="row-step"]')],
+      ["row-trajectory", findByTestId("row-trajectory")],
+      ["row-step", findByTestId("row-step")],
       ["row-quality flag", document.querySelector('[data-testid="row-quality flag"]')],
       ["row-task done", document.querySelector('[data-testid="row-task done"]')],
       ["editor-content-navigation", document.querySelector('[data-testid="editor-content-navigation"]')],
@@ -1171,11 +1184,11 @@
         maxNodes: 250,
         htmlMax: 10000,
       }),
-      rowStep: dumpSubtree(document.querySelector('[data-testid="row-step"]'), {
+      rowStep: dumpSubtree(findByTestId("row-step"), {
         maxNodes: 120,
         htmlMax: 6000,
       }),
-      rowTrajectory: dumpSubtree(document.querySelector('[data-testid="row-trajectory"]'), {
+      rowTrajectory: dumpSubtree(findByTestId("row-trajectory"), {
         maxNodes: 80,
         htmlMax: 4000,
       }),
@@ -1286,8 +1299,8 @@
         signalNodes: bodySignal.length,
         currentFrame,
         totalFrames,
-        hasRowStep: !!document.querySelector('[data-testid="row-step"]'),
-        hasRowTrajectory: !!document.querySelector('[data-testid="row-trajectory"]'),
+        hasRowStep: !!findByTestId("row-step"),
+        hasRowTrajectory: !!findByTestId("row-trajectory"),
       },
     };
   }

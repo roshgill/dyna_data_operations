@@ -2,10 +2,12 @@
 // Write path: Encord classification UI (frame jump + C/V/M or Range start/end inputs).
 // No timeline draw-drag / alt-click / shift-click (those create single-frame pins).
 (() => {
-  const VERSION = "0.14.11-grade";
+  const VERSION = "0.18.1-grade";
   const STORAGE_ENABLED = "autoGradeEnabled";
   // v2 key — invalidates bad caches that stored lastStepNum=2 from truncated scrapes
   const STORAGE_DEFINED_STEPS = "gradeSyncDefinedStepsV2";
+  /** Grade must land on this camera when present (same as layout restore). */
+  const PREFERRED_GRADE_TILE = "cam_high";
   const PCT_EPS = 0.4;
   const FRAME_EPS = 1; // playhead / goto verification only
   const BOUND_EPS = 0; // Grade vs Step end — 1 frame is a real change, not noise
@@ -120,8 +122,21 @@
     };
   }
 
+  function findRowByTestId(rowTestId) {
+    const exact = document.querySelector(`[data-testid="${rowTestId}"]`);
+    if (exact) return exact;
+    const want = String(rowTestId || "").toLowerCase();
+    if (!want) return null;
+    // Encord uses row-Step / row-Trajectory (class casing) on some projects.
+    return (
+      [...document.querySelectorAll("[data-testid]")].find(
+        (el) => (el.getAttribute("data-testid") || "").toLowerCase() === want
+      ) || null
+    );
+  }
+
   function listRanges(rowTestId, opts) {
-    const row = document.querySelector(`[data-testid="${rowTestId}"]`);
+    const row = findRowByTestId(rowTestId);
     if (!row) return [];
     return [...row.querySelectorAll('[data-testid="range"]')]
       .map((el) => describeRange(el, opts))
@@ -139,11 +154,21 @@
   }
 
   function isInTimelineChrome(el) {
-    return !!(
-      el?.closest?.(
-        '[data-testid="classification-timeline"], [data-testid="row-step"], [data-testid="row-trajectory"], [data-testid="scrollable-timeline-id"], [data-testid="timeline-left-rows-id"], [data-testid="range"]'
+    if (!el?.closest) return false;
+    if (
+      el.closest(
+        '[data-testid="classification-timeline"], [data-testid="scrollable-timeline-id"], [data-testid="timeline-left-rows-id"], [data-testid="range"]'
       )
-    );
+    ) {
+      return true;
+    }
+    let node = el;
+    while (node && node !== document.documentElement) {
+      const id = (node.getAttribute?.("data-testid") || "").toLowerCase();
+      if (id === "row-step" || id === "row-trajectory" || /^row-/.test(id)) return true;
+      node = node.parentElement;
+    }
+    return false;
   }
 
   function isInLabelsPane(el) {
@@ -716,30 +741,137 @@
     ]);
   }
 
+  function tileShellFor(el) {
+    if (!(el instanceof Element)) return null;
+    return el.closest(".mosaic-window") || el.closest(".mosaic-tile") || null;
+  }
+
+  function isSubstantialTile(el) {
+    const shell = tileShellFor(el) || el;
+    if (!(shell instanceof Element)) return false;
+    const r = shell.getBoundingClientRect();
+    return r.width >= 120 && r.height >= 120;
+  }
+
+  function normalizeTileId(text) {
+    return normalizeLabel(text)
+      .toLowerCase()
+      .replace(/[-\s]+/g, "_");
+  }
+
+  /**
+   * Resolve the mosaic shell Grade should bind to.
+   * Never use the first tile-display-name in DOM order — that is often a wrist cam
+   * (e.g. other_3) while Annotate/Current sits on cam_high / other_4.
+   */
+  function findPreferredGradeTileShell() {
+    const want = normalizeTileId(PREFERRED_GRADE_TILE);
+
+    for (const nameEl of document.querySelectorAll('[data-testid="tile-display-name"]')) {
+      if (normalizeTileId(nameEl.textContent) !== want) continue;
+      if (!isSubstantialTile(nameEl)) continue;
+      return tileShellFor(nameEl) || nameEl;
+    }
+
+    const byToolbar =
+      document.querySelector(`[data-testid="main-toolbar-${CSS.escape(PREFERRED_GRADE_TILE)}"]`) ||
+      document.querySelector(`[data-testid="secondary-toolbar-${CSS.escape(PREFERRED_GRADE_TILE)}"]`);
+    if (byToolbar && isSubstantialTile(byToolbar)) {
+      return tileShellFor(byToolbar) || byToolbar;
+    }
+
+    const byTag = document.querySelector(`[data-tile-id-tag="${CSS.escape(PREFERRED_GRADE_TILE)}"]`);
+    if (byTag && isSubstantialTile(byTag)) {
+      return tileShellFor(byTag) || byTag;
+    }
+
+    // Media URL still carries cam_high even when the UI label is other_N.
+    for (const el of document.querySelectorAll("video, source, [src], [data-src]")) {
+      const src = el.getAttribute("src") || el.getAttribute("data-src") || "";
+      if (!src) continue;
+      if (
+        !src.includes(`/${PREFERRED_GRADE_TILE}/`) &&
+        !src.includes(`cam_${PREFERRED_GRADE_TILE}`) &&
+        !new RegExp(`(^|/)${PREFERRED_GRADE_TILE}(/|_|\\.|$)`).test(src)
+      ) {
+        continue;
+      }
+      if (!isSubstantialTile(el)) continue;
+      return tileShellFor(el) || el;
+    }
+
+    // Fall back: whatever tile is currently active for Annotate.
+    const modeTag = document.querySelector('[data-testid="editor-mode-status-tag"]');
+    if (modeTag && isSubstantialTile(modeTag)) {
+      return tileShellFor(modeTag) || modeTag;
+    }
+
+    const currentTag = document.querySelector('[data-testid="current-tile-tag-left-sidebar"]');
+    const group = currentTag?.closest?.('[data-testid^="data-group-tile-labels-"]');
+    const groupId = group?.getAttribute("data-testid") || "";
+    const tileId = groupId.replace(/^data-group-tile-labels-/i, "");
+    if (tileId) {
+      for (const nameEl of document.querySelectorAll('[data-testid="tile-display-name"]')) {
+        if (normalizeTileId(nameEl.textContent) !== normalizeTileId(tileId)) continue;
+        if (!isSubstantialTile(nameEl)) continue;
+        return tileShellFor(nameEl) || nameEl;
+      }
+      const tb =
+        document.querySelector(`[data-testid="main-toolbar-${CSS.escape(tileId)}"]`) ||
+        document.querySelector(`[data-testid="secondary-toolbar-${CSS.escape(tileId)}"]`);
+      if (tb && isSubstantialTile(tb)) return tileShellFor(tb) || tb;
+    }
+
+    return null;
+  }
+
+  function clickEl(el) {
+    if (!el) return false;
+    try {
+      el.click();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async function focusPreferredGradeTile() {
+    const shell = findPreferredGradeTileShell();
+    if (!shell) return null;
+    const target =
+      shell.querySelector?.('[data-testid="tile-display-name"]') ||
+      shell.querySelector?.('[data-testid="editor-content"]') ||
+      shell.querySelector?.("video") ||
+      shell.querySelector?.('[data-testid="canvas"]') ||
+      shell;
+    clickEl(target);
+    await sleep(40);
+    clickEl(target);
+    return shell;
+  }
+
   /**
    * Deselect instances via UI clicks. Synthetic Escape is often ignored
    * (isTrusted=false), which leads to "Cannot change class…".
+   * Focus preferred camera first — Grade binds to the active tile.
    */
   async function clearInstanceSelection() {
-    const click = (el) => {
-      if (!el) return false;
-      try {
-        el.click();
-        return true;
-      } catch {
-        return false;
-      }
-    };
-
-    // Camera tile / mode chrome — leaves classification instance selection
-    click(document.querySelector('[data-testid="tile-display-name"]'));
+    const shell = await focusPreferredGradeTile();
     await sleep(40);
-    click(document.querySelector('[data-testid="editor-mode-status-tag"]'));
+
+    const modeTag =
+      shell?.querySelector?.('[data-testid="editor-mode-status-tag"]') ||
+      document.querySelector('[data-testid="editor-mode-status-tag"]');
+    clickEl(modeTag);
     await sleep(40);
 
     const canvas =
-      document.querySelector('[data-testid="canvas"]') ||
-      document.querySelector('[data-testid="editor-content"]');
+      shell?.querySelector?.('[data-testid="canvas"]') ||
+      shell?.querySelector?.('[data-testid="editor-content"]') ||
+      (shell
+        ? null
+        : document.querySelector('[data-testid="canvas"]') ||
+          document.querySelector('[data-testid="editor-content"]'));
     if (canvas) {
       const r = canvas.getBoundingClientRect();
       const x = r.left + Math.min(24, r.width / 2);
@@ -1223,6 +1355,9 @@
     }
 
     await clearInstanceSelection();
+    // Re-assert preferred tile after deselect — ontology clicks must not land on a wrist cam.
+    await focusPreferredGradeTile();
+    await sleep(40);
     const activated = activateTrajectoryClass();
     if (!activated) return { ok: false, error: "no-trajectory-class" };
     await sleep(180);
@@ -1249,7 +1384,7 @@
       clickControlByText([/this frame\s*&\s*save/i, /^this frame$/i, /this frame/i]);
     } else {
       // Last resort: click empty trajectory row near left edge (frame ~0), not "current"
-      const row = document.querySelector('[data-testid="row-trajectory"]');
+      const row = findRowByTestId("row-trajectory");
       if (row) {
         const rect = row.getBoundingClientRect();
         const x = rect.left + 4;
@@ -1540,7 +1675,7 @@
   function ensureStepRowObserver() {
     if (stepRowObserver) return;
     const attach = () => {
-      const row = document.querySelector('[data-testid="row-step"]');
+      const row = findRowByTestId("row-step");
       if (!row || row.dataset.encordGradeStepWatch === "1") return !!row;
       row.dataset.encordGradeStepWatch = "1";
       stepRowObserver = new MutationObserver(() => {
@@ -1615,7 +1750,10 @@
       (event) => {
         if (!event.isTrusted) return;
         if (!location.pathname.includes("/label_editor/")) return;
-        if (!event.target?.closest?.('[data-testid="row-step"], [data-testid="classification-timeline"]')) {
+        if (
+          !event.target?.closest?.('[data-testid="classification-timeline"]') &&
+          !findRowByTestId("row-step")?.contains(event.target)
+        ) {
           return;
         }
         scheduleLastStepResizeSync();
