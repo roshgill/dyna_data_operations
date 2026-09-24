@@ -157,9 +157,11 @@ autoGradeEl.addEventListener("change", async () => {
 
 gradeSyncBtn.addEventListener("click", async () => {
   setBusy(true);
-  setStatus("Syncing Grade…");
+  setStatus("Focusing editor…");
   try {
-    const result = await LayoutOps.gradeSyncNow(await resolveTargetTab());
+    const tab = await resolveTargetTab();
+    // Background focuses the Encord tab first so Grade create isn't stuck on an unfocused page.
+    const result = await chrome.runtime.sendMessage({ type: "OPS_GRADE_SYNC_NOW", tab });
     if (result?.ok) {
       const end = result.snap?.target?.endFrame ?? result.snap?.lastStep?.endFrame;
       const step = result.snap?.lastStep?.stepNum;

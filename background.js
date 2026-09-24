@@ -102,6 +102,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message?.type === "CLEAR_EPISODE_DEFAULT") {
       return LayoutOps.clearEpisodeDefault();
     }
+    if (message?.type === "OPS_GRADE_SYNC_NOW") {
+      return withErrorToast(message.tab, () => LayoutOps.gradeSyncNow(message.tab));
+    }
     return { ok: false, error: "Unknown background op." };
   })()
     .then(sendResponse)

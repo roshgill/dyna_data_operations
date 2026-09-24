@@ -2,7 +2,7 @@
 // Write path: Encord classification UI (frame jump + C/V/M or Range start/end inputs).
 // No timeline draw-drag / alt-click / shift-click (those create single-frame pins).
 (() => {
-  const VERSION = "0.18.1-grade";
+  const VERSION = "0.18.2-grade";
   const STORAGE_ENABLED = "autoGradeEnabled";
   // v2 key — invalidates bad caches that stored lastStepNum=2 from truncated scrapes
   const STORAGE_DEFINED_STEPS = "gradeSyncDefinedStepsV2";
@@ -1495,6 +1495,34 @@
     };
   }
 
+  async function waitForPageFocus(timeoutMs = 2500) {
+    if (document.hasFocus()) return { ok: true, waited: false };
+    const started = Date.now();
+    await new Promise((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        window.removeEventListener("focus", onFocus);
+        document.removeEventListener("visibilitychange", onVis);
+        clearInterval(poll);
+        clearTimeout(timer);
+        resolve();
+      };
+      const onFocus = () => finish();
+      const onVis = () => {
+        if (document.visibilityState === "visible" && document.hasFocus()) finish();
+      };
+      window.addEventListener("focus", onFocus);
+      document.addEventListener("visibilitychange", onVis);
+      const poll = setInterval(() => {
+        if (document.hasFocus()) finish();
+      }, 50);
+      const timer = setTimeout(finish, timeoutMs);
+    });
+    return { ok: document.hasFocus(), waited: true, ms: Date.now() - started };
+  }
+
   async function syncGrade({ force = false, quiet = false } = {}) {
     if (!enabled && !force) return { ok: false, skipped: true, reason: "disabled" };
     if (syncing) return { ok: false, skipped: true, reason: "busy" };
@@ -1531,6 +1559,9 @@
 
     syncing = true;
     try {
+      // Details panel steals focus — wait until the editor is focused before creating Grade.
+      await waitForPageFocus(force ? 2500 : 800);
+
       // Absolute bounds only — never derive start from playhead / currentFrame
       const startFrame = 0;
       const endFrame = snap.target.endFrame;
