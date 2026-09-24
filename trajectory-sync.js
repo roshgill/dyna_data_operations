@@ -2,7 +2,7 @@
 // Write path: Encord classification UI (frame jump + C/V/M or Range start/end inputs).
 // No timeline draw-drag / alt-click / shift-click (those create single-frame pins).
 (() => {
-  const VERSION = "0.18.2-grade";
+  const VERSION = "0.18.5-grade";
   const STORAGE_ENABLED = "autoGradeEnabled";
   // v2 key — invalidates bad caches that stored lastStepNum=2 from truncated scrapes
   const STORAGE_DEFINED_STEPS = "gradeSyncDefinedStepsV2";
@@ -474,30 +474,94 @@
     return !t || t === "grade" || /^grade\b/.test(t);
   }
 
-  /** Prefer a real span; fall back to pin (1-frame) grade markers. */
-  function findPrimaryGradeRange() {
-    const all = listRanges("row-trajectory").filter((r) => isGradeLabel(r.label));
-    if (!all.length) {
-      const any = listRanges("row-trajectory");
-      if (!any.length) return null;
-      any.sort((a, b) => b.width - a.width);
-      return any[0];
-    }
-    const spans = all.filter((r) => !r.pin && r.width >= 0.35);
-    if (spans.length) {
-      spans.sort((a, b) => b.width - a.width);
-      return spans[0];
-    }
-    all.sort((a, b) => b.width - a.width || b.left - a.left);
-    return all[0];
+  function withGradeFrames(range, totalFrames) {
+    if (!range || !totalFrames) return null;
+    // Re-read CSS when we have an element — callers often pass stale startFrame/endFrame.
+    const live = range.el ? describeRange(range.el) || range : range;
+    const startFrame = pctToFrame(live.left, totalFrames);
+    const endFrame = pctToEndFrame(live.end, totalFrames);
+    return {
+      ...live,
+      el: range.el || live.el,
+      startFrame,
+      endFrame,
+      span: endFrame - startFrame,
+    };
   }
 
   function listGradeRanges() {
     return listRanges("row-trajectory").filter((r) => isGradeLabel(r.label));
   }
 
+  function listGradeRangesWithFrames(totalFrames = getTotalFrames()) {
+    if (!totalFrames) return [];
+    return listGradeRanges()
+      .map((r) => withGradeFrames(r, totalFrames))
+      .filter(Boolean);
+  }
+
+  /** Prefer the Grade spanning from frame 0 (main sync); else widest. */
+  function findPrimaryGradeRange() {
+    const total = getTotalFrames();
+    const all = listGradeRangesWithFrames(total);
+    if (!all.length) {
+      const any = listRanges("row-trajectory");
+      if (!any.length) return null;
+      any.sort((a, b) => b.width - a.width);
+      return withGradeFrames(any[0], total) || any[0];
+    }
+    const fromZero = all.filter((r) => r.startFrame <= BOUND_EPS + 1);
+    const pool = fromZero.length ? fromZero : all;
+    const spans = pool.filter((r) => !r.pin && r.width >= 0.35);
+    if (spans.length) {
+      spans.sort((a, b) => b.width - a.width);
+      return spans[0];
+    }
+    pool.sort((a, b) => b.width - a.width || b.left - a.left);
+    return pool[0];
+  }
+
+  /** Grade whose start is nearest to wantStart (for the post-last-step tail). */
+  function findGradeNearStart(wantStart, totalFrames = getTotalFrames()) {
+    if (wantStart == null || !totalFrames) return null;
+    const all = listGradeRangesWithFrames(totalFrames);
+    if (!all.length) return null;
+    const tol = Math.max(BOUND_EPS, 2);
+    // When looking for a tail, never return the primary (starts at ~0).
+    const pool =
+      wantStart > 1 ? all.filter((r) => (r.startFrame ?? 0) > 1) : all;
+    if (!pool.length) return null;
+    const hits = pool.filter((r) => Math.abs(r.startFrame - wantStart) <= tol);
+    if (hits.length) {
+      hits.sort(
+        (a, b) =>
+          Math.abs(a.startFrame - wantStart) - Math.abs(b.startFrame - wantStart) ||
+          b.width - a.width
+      );
+      return hits[0];
+    }
+    const inTail = pool.filter((r) => r.startFrame >= wantStart - tol);
+    inTail.sort((a, b) => a.startFrame - b.startFrame);
+    return inTail[0] || null;
+  }
+
+  function episodeLastFrame(totalFrames = getTotalFrames()) {
+    if (!totalFrames) return null;
+    return Math.max(0, totalFrames - 1);
+  }
+
   function pctToFrame(pct, totalFrames) {
-    return Math.max(0, Math.min(totalFrames, Math.round((pct / 100) * totalFrames)));
+    if (!totalFrames) return 0;
+    // Same basis as the playhead: frame N sits at (N / totalFrames) * 100%.
+    return Math.max(0, Math.min(totalFrames, Math.round((Number(pct) / 100) * totalFrames)));
+  }
+
+  /** Inclusive range end (clamped to last episode frame). */
+  function pctToEndFrame(pct, totalFrames) {
+    if (!totalFrames) return 0;
+    const raw = (Number(pct) / 100) * totalFrames;
+    // Near-integer float noise (425.9999) → round to that frame.
+    return Math.max(0, Math.min(totalFrames - 1, Math.round(raw)));
   }
 
   function setNativeInputValue(input, value) {
@@ -1148,20 +1212,29 @@
     }
   }
 
-  function timelineBounds() {
-    const grade = findPrimaryGradeRange();
+  function timelineBounds(preferRange = null) {
     const total = getTotalFrames();
+    let grade = preferRange || findPrimaryGradeRange();
     if (!grade || !total) return null;
+    // Always re-derive from live CSS — preferRange may carry stale startFrame/endFrame.
+    if (grade.el) {
+      const live = describeRange(grade.el);
+      grade = live ? withGradeFrames(live, total) : withGradeFrames(grade, total);
+    } else if (grade.startFrame == null || grade.endFrame == null) {
+      grade = withGradeFrames(grade, total);
+    }
+    if (!grade) return null;
     return {
-      startFrame: pctToFrame(grade.left, total),
-      endFrame: pctToFrame(grade.end, total),
-      span: pctToFrame(grade.width, total),
+      startFrame: grade.startFrame,
+      endFrame: grade.endFrame,
+      span: grade.span,
       total,
+      el: grade.el,
     };
   }
 
-  function timelineMatches(wantStart, wantEnd) {
-    const t = timelineBounds();
+  function timelineMatches(wantStart, wantEnd, preferRange = null) {
+    const t = timelineBounds(preferRange);
     if (!t) return false;
     return (
       Math.abs(t.startFrame - wantStart) <= BOUND_EPS &&
@@ -1172,28 +1245,57 @@
   /**
    * Commit real timeline geometry. Zero-width pins ignore Range inputs (fields can
    * show 0–810 while the bar stays 827–827). Order:
-   * 1) Fill-to-playhead at 0 and at wantEnd (creates a real span)
+   * 1) Fill-to-playhead at wantStart and at wantEnd (creates a real span)
    * 2) Range inputs for exact values
    * 3) ⌥-arrow Adjust left/right to nudge remaining error
    * Success requires the timeline bar to match — never inputs-only.
+   *
+   * opts.lockToSelectRange: when resizing a non-primary Grade (tail), never fall
+   * back to the primary 0…last-step instance — that was shrinking G1 by 1 when G2
+   * Fill/inputs landed on the wrong bar.
    */
-  async function resizeViaRangeInputs(_startFrame, endFrame) {
-    const wantStart = 0;
-    const liveStep = findLastStepRange();
+  async function resizeViaRangeInputs(startFrame, endFrame, opts = {}) {
     const totalLive = getTotalFrames();
-    let wantEnd = Math.max(
-      wantStart,
-      Math.floor(liveStep && totalLive ? pctToFrame(liveStep.end, totalLive) : endFrame)
-    );
+    let wantStart = Math.max(0, Math.floor(startFrame));
+    let wantEnd = Math.max(wantStart, Math.floor(endFrame));
     if (totalLive) {
       wantEnd = Math.min(wantEnd, Math.max(0, totalLive - 1));
+      wantStart = Math.min(wantStart, wantEnd);
+    }
+    const matchStart = opts.matchStart != null ? opts.matchStart : wantStart;
+    // Tail / non-zero start: never rewrite the primary Grade by accident.
+    const lockTail = opts.lockToSelectRange === true || matchStart > 1;
+
+    function refreshActive() {
+      const near = findGradeNearStart(matchStart, getTotalFrames());
+      if (near) return near;
+      if (opts.selectRange?.el?.isConnected) {
+        const live = describeRange(opts.selectRange.el);
+        return live
+          ? withGradeFrames(live, getTotalFrames())
+          : withGradeFrames(opts.selectRange, getTotalFrames());
+      }
+      if (lockTail) return null;
+      return findPrimaryGradeRange();
     }
 
+    let active = opts.selectRange || refreshActive();
+
     async function selectGrade() {
-      const grade = findPrimaryGradeRange();
-      if (!grade) return false;
+      active = refreshActive() || (opts.selectRange?.el?.isConnected ? opts.selectRange : null) || active;
+      if (!active?.el) return false;
+      // Guard: locked tail resize must not click the primary (start≈0) bar.
+      if (lockTail) {
+        const framed = withGradeFrames(
+          active.el ? describeRange(active.el) || active : active,
+          getTotalFrames()
+        );
+        if (framed && framed.startFrame <= 1 && matchStart > 2) {
+          return false;
+        }
+      }
       try {
-        grade.el.click();
+        active.el.click();
       } catch {
         return false;
       }
@@ -1231,47 +1333,54 @@
     async function fillAt(frame) {
       const jumped = await goToFrame(frame);
       await sleep(70);
-      await selectGrade();
+      const selected = await selectGrade();
+      if (!selected) {
+        return { jumped: jumped.ok, via: null, geo: null, error: "fill-no-select" };
+      }
       const via = jumped.ok ? clickFillToPlayhead() : null;
       await sleep(240);
-      return { jumped: jumped.ok, via, geo: timelineBounds() };
+      active = refreshActive() || active;
+      return { jumped: jumped.ok, via, geo: timelineBounds(active) };
     }
 
     if (!(await selectGrade()) && !findRangeBoundInputs()) {
-      return { ok: false, error: "no-grade" };
+      return { ok: false, error: lockTail ? "no-tail-grade" : "no-grade" };
     }
 
     for (let attempt = 0; attempt < 5; attempt += 1) {
       await selectGrade();
-      let geo = timelineBounds();
+      active = refreshActive() || active;
+      let geo = timelineBounds(active);
 
       // 1) Expand pin → real range via Fill (inputs alone do not grow a pin)
       if (!geo || geo.span <= 2 || Math.abs(geo.startFrame - wantStart) > BOUND_EPS) {
         await fillAt(wantStart);
-        geo = timelineBounds();
+        active = refreshActive() || active;
+        geo = timelineBounds(active);
       }
       if (!geo || geo.endFrame < wantEnd) {
         await fillAt(wantEnd);
-        geo = timelineBounds();
+        active = refreshActive() || active;
+        geo = timelineBounds(active);
       }
-      // If still a pin past wantEnd (e.g. 827), Fill at 0 then at wantEnd
       if (geo && geo.span <= 2) {
         await fillAt(wantStart);
         await fillAt(wantEnd);
-        geo = timelineBounds();
+        active = refreshActive() || active;
+        geo = timelineBounds(active);
       }
 
       // 2) Exact values via Range inputs (works once a real span exists)
       const written = await writeInputs(wantStart, wantEnd);
       await sleep(150);
-      geo = timelineBounds();
+      active = refreshActive() || active;
+      geo = timelineBounds(active);
 
       // 3) Nudge with Adjust left/right (⌥←/→, ⌥⇧←/→) if still off
-      if (geo && !timelineMatches(wantStart, wantEnd)) {
+      if (geo && !timelineMatches(wantStart, wantEnd, active)) {
         await selectGrade();
         const startDelta = wantStart - geo.startFrame;
         const endDelta = wantEnd - geo.endFrame;
-        // Cap steps so we don't spin forever on a stuck control
         if (Math.abs(startDelta) > 0 && Math.abs(startDelta) <= 40) {
           adjustLeftSide(startDelta);
           await sleep(120);
@@ -1280,16 +1389,17 @@
           adjustRightSide(endDelta);
           await sleep(120);
         }
-        geo = timelineBounds();
-        // Re-type after nudge
-        if (!timelineMatches(wantStart, wantEnd)) {
+        active = refreshActive() || active;
+        geo = timelineBounds(active);
+        if (!timelineMatches(wantStart, wantEnd, active)) {
           await writeInputs(wantStart, wantEnd);
           await sleep(120);
         }
       }
 
-      // 4) Last resort: if end still high, Fill can't shrink — keep Adjust end down
-      geo = timelineBounds();
+      // 4) Last resort: shrink end with Adjust
+      active = refreshActive() || active;
+      geo = timelineBounds(active);
       if (geo && geo.endFrame > wantEnd && geo.endFrame - wantEnd <= 60) {
         await selectGrade();
         adjustRightSide(wantEnd - geo.endFrame);
@@ -1298,15 +1408,45 @@
         await sleep(100);
       }
 
-      if (timelineMatches(wantStart, wantEnd)) {
-        // Do not Done/Escape — that would deselect Grade. Only leave frame inputs.
+      // 5) Encord often settles one frame short of Range end — extend if short by 1–2
+      active = refreshActive() || active;
+      geo = timelineBounds(active);
+      if (geo && geo.endFrame < wantEnd && wantEnd - geo.endFrame <= 2) {
+        const shortBy = wantEnd - geo.endFrame;
+        await selectGrade();
+        for (let n = 0; n < shortBy + 1; n += 1) {
+          adjustRightSide(1);
+          await sleep(100);
+          await writeInputs(wantStart, wantEnd);
+          await sleep(120);
+          active = refreshActive() || active;
+          geo = timelineBounds(active);
+          if (geo && Math.abs(geo.endFrame - wantEnd) <= BOUND_EPS) break;
+        }
+      }
+
+      active = refreshActive() || active;
+      if (timelineMatches(wantStart, wantEnd, active)) {
         await blurRangeFrameInputs();
-        await sleep(80);
-        if (timelineMatches(wantStart, wantEnd)) {
+        await sleep(160);
+        // Re-read after blur — Encord can snap end back by 1 frame on commit
+        active = refreshActive() || active;
+        geo = timelineBounds(active);
+        if (geo && geo.endFrame < wantEnd && wantEnd - geo.endFrame <= 2) {
+          await selectGrade();
+          adjustRightSide(wantEnd - geo.endFrame);
+          await sleep(120);
+          await writeInputs(wantStart, wantEnd);
+          await sleep(120);
+          await blurRangeFrameInputs();
+          await sleep(120);
+          active = refreshActive() || active;
+        }
+        if (timelineMatches(wantStart, wantEnd, active)) {
           return {
             ok: true,
             via: "fill+inputs+adjust+timeline",
-            after: timelineBounds(),
+            after: timelineBounds(active),
             want: { startFrame: wantStart, endFrame: wantEnd },
             written,
             attempts: attempt + 1,
@@ -1316,13 +1456,13 @@
       }
     }
 
-    const t = timelineBounds();
+    active = refreshActive() || active;
+    const t = timelineBounds(active);
     const inputs = findRangeBoundInputs();
     return {
       ok: false,
       error: "cannot-set-timeline-range",
-      message:
-        "Frame fields may show the right numbers, but the timeline annotation did not move to 0–last step end.",
+      message: `Frame fields may show the right numbers, but the timeline annotation did not move to ${wantStart}–${wantEnd}.`,
       timeline: t,
       inputs: inputs
         ? {
@@ -1420,6 +1560,81 @@
     return { ok: false, error: "create-pin-failed" };
   }
 
+  /**
+   * Always create a new Grade pin at `frame` (for the post-last-step tail).
+   * Does not reuse the primary 0…last-step instance.
+   */
+  async function createGradePinAt(frame) {
+    const total = getTotalFrames();
+    const at = Math.max(0, Math.min(Math.floor(frame), episodeLastFrame(total) ?? Math.floor(frame)));
+    const before = new Set(listGradeRanges().map((r) => r.el));
+
+    await clearInstanceSelection();
+    await focusPreferredGradeTile();
+    await sleep(40);
+    const activated = activateTrajectoryClass();
+    if (!activated) return { ok: false, error: "no-trajectory-class" };
+    await sleep(180);
+
+    const gradeHit = [...document.querySelectorAll("label, [role='radio'], button, [role='button']")].find(
+      (el) => {
+        if (el.closest('[data-testid="range"]')) return false;
+        if (el.closest('[data-testid="classification-timeline"]')) return false;
+        const t = normalizeLabel(el.textContent);
+        return t.length > 0 && t.length < 16 && /^grade$/i.test(t);
+      }
+    );
+    if (gradeHit) gradeHit.click();
+    else pressEditorKey("q");
+    await sleep(100);
+
+    const jumped = await goToFrame(at);
+    document.activeElement?.blur?.();
+    await sleep(40);
+
+    if (jumped.ok) {
+      clickControlByText([/this frame\s*&\s*save/i, /^this frame$/i, /this frame/i]);
+    } else if (total) {
+      const row = findRowByTestId("row-trajectory");
+      if (row) {
+        const rect = row.getBoundingClientRect();
+        const x = rect.left + Math.max(4, (at / Math.max(1, total - 1)) * rect.width);
+        const y = rect.top + rect.height / 2;
+        const el = document.elementFromPoint(x, y) || row;
+        el.dispatchEvent(
+          new MouseEvent("click", {
+            bubbles: true,
+            cancelable: true,
+            clientX: x,
+            clientY: y,
+            altKey: true,
+            view: window,
+          })
+        );
+      }
+    }
+    await sleep(450);
+
+    let pin =
+      findGradeNearStart(at, total) ||
+      listGradeRanges().find((r) => !before.has(r.el)) ||
+      null;
+    if (pin?.el) {
+      try {
+        pin.el.click();
+      } catch {
+        /* ignore */
+      }
+      await sleep(220);
+      pin = findGradeNearStart(at, total) || pin;
+    }
+
+    if (findRangeBoundInputs() || pin) {
+      return { ok: true, via: jumped.ok ? "pin-at-frame" : "pin-provisional", created: true, frame: at, range: pin };
+    }
+    return { ok: false, error: "create-tail-pin-failed", frame: at };
+  }
+
   function snapshot() {
     const totalFrames = getTotalFrames();
     const defined = definedStepsCache?.projectKey === getProjectKey() ? definedStepsCache : null;
@@ -1449,21 +1664,33 @@
         grade: null,
         definedSteps: defined,
         timelineMaxStep: timelineMax
-          ? { stepNum: timelineMax.stepNum, endFrame: pctToFrame(timelineMax.end, totalFrames) }
+          ? { stepNum: timelineMax.stepNum, endFrame: pctToEndFrame(timelineMax.end, totalFrames) }
           : null,
       };
     }
     const targetEndPct = lastStep.end;
-    const targetEndFrame = pctToFrame(targetEndPct, totalFrames);
-    const gradeEndFrame = grade ? pctToFrame(grade.end, totalFrames) : null;
+    const targetEndFrame = pctToEndFrame(targetEndPct, totalFrames);
+    const episodeEnd = episodeLastFrame(totalFrames);
+    const tailStart = targetEndFrame + 1;
+    const hasTail = episodeEnd != null && tailStart <= episodeEnd;
+    const gradeEndFrame = grade ? pctToEndFrame(grade.end, totalFrames) : null;
     const gradeStartFrame = grade ? pctToFrame(grade.left, totalFrames) : null;
     const gradeSpan =
       grade && gradeEndFrame != null && gradeStartFrame != null ? gradeEndFrame - gradeStartFrame : 0;
-    const needsSync =
+    const primaryNeedsSync =
       !grade ||
       gradeSpan <= 2 ||
       Math.abs((gradeStartFrame ?? -1) - 0) > BOUND_EPS ||
       Math.abs((gradeEndFrame ?? -1) - targetEndFrame) > BOUND_EPS;
+
+    const tailGrade = hasTail ? findGradeNearStart(tailStart, totalFrames) : null;
+    const tailOk =
+      !hasTail ||
+      (tailGrade &&
+        (tailGrade.span ?? tailGrade.endFrame - tailGrade.startFrame) > 2 &&
+        Math.abs(tailGrade.startFrame - tailStart) <= BOUND_EPS &&
+        Math.abs(tailGrade.endFrame - episodeEnd) <= BOUND_EPS);
+    const needsSync = primaryNeedsSync || !tailOk;
 
     return {
       ready: true,
@@ -1484,14 +1711,22 @@
             span: gradeSpan,
           }
         : null,
+      tailGrade: tailGrade
+        ? {
+            startFrame: tailGrade.startFrame,
+            endFrame: tailGrade.endFrame,
+            span: tailGrade.span,
+          }
+        : null,
       target: { startFrame: 0, endFrame: targetEndFrame, startPct: 0, endPct: targetEndPct },
+      tailTarget: hasTail ? { startFrame: tailStart, endFrame: episodeEnd } : null,
       needsSync,
       gradeCount: listGradeRanges().length,
       definedSteps: defined,
       timelineMaxStep: timelineMax
-        ? { stepNum: timelineMax.stepNum, endFrame: pctToFrame(timelineMax.end, totalFrames) }
+        ? { stepNum: timelineMax.stepNum, endFrame: pctToEndFrame(timelineMax.end, totalFrames) }
         : null,
-      key: `step${lastStep.stepNum}:${targetEndFrame}:${totalFrames}`,
+      key: `step${lastStep.stepNum}:${targetEndFrame}:${totalFrames}:tail${hasTail ? `${tailStart}-${episodeEnd}` : "none"}`,
     };
   }
 
@@ -1563,7 +1798,6 @@
       await waitForPageFocus(force ? 2500 : 800);
 
       // Absolute bounds only — never derive start from playhead / currentFrame
-      const startFrame = 0;
       const endFrame = snap.target.endFrame;
 
       const ensured = await ensureTrajectoryInstance();
@@ -1578,7 +1812,7 @@
         return { ok: false, error: ensured.error || "ensure-failed", ensured, snap };
       }
 
-      const wrote = await resizeViaRangeInputs(startFrame, endFrame);
+      const wrote = await resizeViaRangeInputs(0, endFrame, { matchStart: 0 });
       if (wrote.ok) {
         // Final guard: start must be 0 and end must be last-step (not playhead)
         const check = snapshot();
@@ -1594,7 +1828,7 @@
           Math.abs(endFrame - playhead) > BOUND_EPS;
 
         if (!startOk || !endOk || endIsPlayhead) {
-          const retry = await resizeViaRangeInputs(0, endFrame);
+          const retry = await resizeViaRangeInputs(0, endFrame, { matchStart: 0 });
           const afterRetry = snapshot();
           const retryOk =
             retry.ok &&
@@ -1613,20 +1847,145 @@
             };
           }
         }
-        const after = snapshot();
-        lastAppliedKey = snap.key;
-        // Grade stays selected; blur frame inputs so grade hotkeys work
-        await blurRangeFrameInputs();
-        if (!quiet) {
-          const msg = ensured.created
-            ? `Grade created 0–${endFrame} (step ${snap.lastStep.stepNum})`
-            : `Grade set to 0–${endFrame} (step ${snap.lastStep.stepNum})`;
-          if (lastToastKey !== msg) {
-            lastToastKey = msg;
-            showToast(msg, "ok");
+
+        // Second Grade: abut primary end + 1 → episode end.
+        // Creating/resizing G2 used to fall back onto G1 (Fill + Range inputs), which
+        // shrunk G1 by 1 and left G2 starting one frame late. Pin G2 away from the
+        // G1 boundary, lock resize to that instance, then re-assert G1.
+        const total = snap.totalFrames || getTotalFrames();
+        const episodeEnd = episodeLastFrame(total);
+        let primaryGeo = findPrimaryGradeRange();
+        let primaryEnd = primaryGeo?.endFrame ?? endFrame;
+        if (primaryEnd < endFrame && endFrame - primaryEnd <= 2) {
+          const fixShort = await resizeViaRangeInputs(0, endFrame, { matchStart: 0 });
+          primaryGeo = findPrimaryGradeRange();
+          primaryEnd = primaryGeo?.endFrame ?? primaryEnd;
+          if (!fixShort.ok || primaryEnd < endFrame) {
+            return {
+              ok: false,
+              error: "primary-end-short",
+              wrote,
+              fixShort,
+              wantEnd: endFrame,
+              primaryEnd,
+              snap: snapshot(),
+            };
           }
         }
-        return { ok: true, method: "ensure+range-inputs", snap: after, ensured, wrote };
+        const tailStart = endFrame + 1;
+        let wroteTail = { ok: true, skipped: true, reason: "no-tail-frames" };
+        if (episodeEnd != null && tailStart <= episodeEnd) {
+          let tail = findGradeNearStart(tailStart, total);
+          // Prefer an existing non-primary grade in the tail region; avoid the primary.
+          if (tail && tail.startFrame <= 1) tail = null;
+          const tailReady =
+            tail &&
+            (tail.span ?? 0) > 2 &&
+            Math.abs(tail.startFrame - tailStart) <= BOUND_EPS &&
+            Math.abs(tail.endFrame - episodeEnd) <= BOUND_EPS;
+          if (!tailReady) {
+            if (!tail || Math.abs((tail.startFrame ?? -1) - tailStart) > 2) {
+              // Create far from G1's end so Encord doesn't auto-trim the abutting edge.
+              const pinAt = episodeEnd;
+              const createdTail = await createGradePinAt(pinAt);
+              if (!createdTail.ok) {
+                wroteTail = { ok: false, error: createdTail.error || "create-tail-failed", createdTail };
+              } else {
+                tail =
+                  findGradeNearStart(pinAt, total) ||
+                  findGradeNearStart(tailStart, total) ||
+                  createdTail.range;
+                if (tail && tail.startFrame <= 1) {
+                  wroteTail = { ok: false, error: "tail-pin-resolved-to-primary" };
+                  tail = null;
+                }
+              }
+            }
+            if (wroteTail.ok !== false && tail) {
+              wroteTail = await resizeViaRangeInputs(tailStart, episodeEnd, {
+                matchStart: Math.max(tailStart, tail.startFrame || tailStart),
+                selectRange: tail,
+                lockToSelectRange: true,
+              });
+            } else if (wroteTail.ok !== false && !tail) {
+              wroteTail = { ok: false, error: "no-tail-instance" };
+            }
+          } else {
+            wroteTail = { ok: true, skipped: true, reason: "tail-already-synced" };
+          }
+
+          // Re-assert G1 after G2 — Encord / mistaken Fill can still trim primary by 1.
+          await sleep(120);
+          primaryGeo = findPrimaryGradeRange();
+          if (
+            !primaryGeo ||
+            Math.abs((primaryGeo.endFrame ?? -1) - endFrame) > BOUND_EPS ||
+            Math.abs((primaryGeo.startFrame ?? -1) - 0) > BOUND_EPS
+          ) {
+            const restorePrimary = await resizeViaRangeInputs(0, endFrame, { matchStart: 0 });
+            primaryGeo = findPrimaryGradeRange();
+            if (
+              !restorePrimary.ok ||
+              Math.abs((primaryGeo?.endFrame ?? -1) - endFrame) > BOUND_EPS
+            ) {
+              return {
+                ok: false,
+                error: "primary-trimmed-by-tail",
+                wrote,
+                wroteTail,
+                restorePrimary,
+                wantEnd: endFrame,
+                primaryEnd: primaryGeo?.endFrame,
+                snap: snapshot(),
+              };
+            }
+            // If restoring G1 nudged G2, fix G2 once more (still locked off primary).
+            const tailAfter = findGradeNearStart(tailStart, total);
+            if (
+              wroteTail.ok &&
+              tailAfter &&
+              tailAfter.startFrame > 1 &&
+              (Math.abs(tailAfter.startFrame - tailStart) > BOUND_EPS ||
+                Math.abs(tailAfter.endFrame - episodeEnd) > BOUND_EPS)
+            ) {
+              wroteTail = await resizeViaRangeInputs(tailStart, episodeEnd, {
+                matchStart: tailStart,
+                selectRange: tailAfter,
+                lockToSelectRange: true,
+              });
+            }
+          }
+          primaryEnd = findPrimaryGradeRange()?.endFrame ?? endFrame;
+        }
+
+        const after = snapshot();
+        lastAppliedKey = snap.key;
+        await blurRangeFrameInputs();
+        if (!quiet) {
+          const tailBit =
+            wroteTail.skipped && wroteTail.reason === "no-tail-frames"
+              ? ""
+              : wroteTail.ok
+                ? ` + ${tailStart}–${episodeEnd}`
+                : ` (tail ${tailStart}–${episodeEnd} failed)`;
+          const msg = ensured.created
+            ? `Grade 0–${primaryEnd}${tailBit} (step ${snap.lastStep.stepNum})`
+            : `Grade set 0–${primaryEnd}${tailBit} (step ${snap.lastStep.stepNum})`;
+          if (lastToastKey !== msg) {
+            lastToastKey = msg;
+            showToast(msg, wroteTail.ok === false ? "warn" : "ok");
+          }
+        }
+        return {
+          ok: wroteTail.ok !== false,
+          method: "ensure+range-inputs+tail",
+          snap: after,
+          ensured,
+          wrote,
+          wroteTail,
+          primaryEnd,
+          error: wroteTail.ok === false ? wroteTail.error : undefined,
+        };
       }
 
       if (!quiet) {
@@ -1677,7 +2036,7 @@
 
         const total = getTotalFrames();
         if (!total) return;
-        const endFrame = pctToFrame(lastRange.end, total);
+        const endFrame = pctToEndFrame(lastRange.end, total);
         const endKey = `step${defined.lastStepNum}:${endFrame}:${total}`;
 
         // Still settling / unchanged
@@ -1690,7 +2049,7 @@
           return;
         }
 
-        const gradeEnd = pctToFrame(grade.end, total);
+        const gradeEnd = pctToEndFrame(grade.end, total);
         const gradeStart = pctToFrame(grade.left, total);
         const already =
           Math.abs(gradeStart - 0) <= BOUND_EPS &&
