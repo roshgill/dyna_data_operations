@@ -2,7 +2,7 @@
 // Write path: Encord classification UI (frame jump + C/V/M or Range start/end inputs).
 // No timeline draw-drag / alt-click / shift-click (those create single-frame pins).
 (() => {
-  const VERSION = "0.18.11-grade";
+  const VERSION = "0.18.18-grade";
   const STORAGE_ENABLED = "autoGradeEnabled";
   // v2 key — invalidates bad caches that stored lastStepNum=2 from truncated scrapes
   const STORAGE_DEFINED_STEPS = "gradeSyncDefinedStepsV2";
@@ -452,49 +452,202 @@
     ].filter(Boolean);
   }
 
+  function isStepOutcomeChoiceLabel(raw) {
+    return /^(pass|fail|incomplete)$/i.test(normalizeLabel(raw));
+  }
+
+  function isRadioChecked(el) {
+    if (!el) return false;
+    const input =
+      (el.matches?.('input[type="radio"]') && el) ||
+      el.querySelector?.('input[type="radio"]') ||
+      null;
+    if (input?.checked) return true;
+    const wrap = el.closest?.("label.ant-radio-wrapper, label, [role='radio']") || el;
+    if (wrap.classList?.contains("ant-radio-wrapper-checked")) return true;
+    if (wrap.querySelector?.(".ant-radio-checked, [aria-checked='true']")) return true;
+    if (wrap.getAttribute?.("aria-checked") === "true") return true;
+    return false;
+  }
+
   /**
-   * S2 value = last Step option in the selection array ("incomplete").
-   * Call with a Step instance selected so the value radios are visible.
+   * Step Outcome radios: Pass / Fail / Incomplete (not Step identity, not Grade).
+   * Distinguishes from Grade's incomplete by requiring Pass or Fail in the same group.
+   */
+  function scrapeStepOutcomeOptions(root) {
+    if (!root) return [];
+
+    // Prefer the section under an explicit "Step Outcome" heading
+    const heading = [...root.querySelectorAll("div, span, label, p, h1, h2, h3, h4")].find((el) => {
+      if (isInTimelineChrome(el) || isInLabelsPane(el)) return false;
+      const t = normalizeLabel(el.textContent);
+      return t.length > 0 && t.length < 40 && /^step\s*outcome$/i.test(t);
+    });
+    if (heading) {
+      let section = heading.parentElement;
+      for (let i = 0; i < 5 && section; i += 1) {
+        const labels = [...section.querySelectorAll("label.ant-radio-wrapper, label, [role='radio']")]
+          .filter((el) => {
+            if (isInTimelineChrome(el) || isInLabelsPane(el)) return false;
+            const t = normalizeLabel(el.textContent);
+            return t.length > 0 && t.length < 24 && isStepOutcomeChoiceLabel(t);
+          })
+          .map((el, order) => ({ label: normalizeLabel(el.textContent), el, order }));
+        const names = new Set(labels.map((o) => o.label.toLowerCase()));
+        if (names.has("incomplete") && (names.has("pass") || names.has("fail"))) {
+          const dedup = [];
+          const seen = new Set();
+          for (const o of labels) {
+            const k = o.label.toLowerCase();
+            if (seen.has(k)) continue;
+            seen.add(k);
+            dedup.push(o);
+          }
+          return dedup;
+        }
+        section = section.parentElement;
+      }
+    }
+
+    const labels = [...root.querySelectorAll("label.ant-radio-wrapper, label, [role='radio']")].filter(
+      (el) => {
+        if (isInTimelineChrome(el) || isInLabelsPane(el)) return false;
+        const t = normalizeLabel(el.textContent);
+        return t.length > 0 && t.length < 24 && isStepOutcomeChoiceLabel(t);
+      }
+    );
+    if (!labels.length) return [];
+
+    const groups = new Map();
+    for (const el of labels) {
+      const parent =
+        el.closest('[role="radiogroup"], .ant-radio-group, [class*="Radio"]') ||
+        el.closest('[data-testid]') ||
+        el.parentElement?.parentElement ||
+        el.parentElement;
+      const key = parent || el;
+      if (!groups.has(key)) groups.set(key, []);
+      const t = normalizeLabel(el.textContent);
+      const keyLabel = t.toLowerCase();
+      if (groups.get(key).some((o) => o.label.toLowerCase() === keyLabel)) continue;
+      groups.get(key).push({ label: t, el, order: groups.get(key).length });
+    }
+
+    // Prefer a group that looks like Step Outcome (has Incomplete + Pass or Fail)
+    let best = null;
+    for (const opts of groups.values()) {
+      const names = new Set(opts.map((o) => o.label.toLowerCase()));
+      if (!names.has("incomplete")) continue;
+      if (!names.has("pass") && !names.has("fail")) continue;
+      if (!best || opts.length > best.length) best = opts;
+    }
+    return best || [];
+  }
+
+  function findStepOutcomeIncompleteChecked() {
+    for (const root of stepSelectionRoots()) {
+      const opts = scrapeStepOutcomeOptions(root);
+      const hit = opts.find((o) => /^incomplete$/i.test(o.label));
+      if (hit && isRadioChecked(hit.el)) return { ok: true, hit, options: opts.map((o) => o.label) };
+    }
+    return { ok: false };
+  }
+
+  /**
+   * S2 attribute = Step Outcome → Incomplete.
+   * Never use hotkey I — that is also Grade Incomplete and would mark G2.
    */
   function selectIncompleteStepOption() {
     for (const root of stepSelectionRoots()) {
-      const opts = scrapeOrderedStepSelectionOptions(root);
+      const opts = scrapeStepOutcomeOptions(root);
       if (!opts.length) continue;
-      const hit =
-        opts.find((o) => o.incomplete || isIncompleteStepLabel(o.label)) ||
-        opts[opts.length - 1];
+      const hit = opts.find((o) => /^incomplete$/i.test(o.label));
       if (!hit) continue;
-      const target =
-        hit.el?.querySelector?.("label.ant-radio-wrapper, label, input[type='radio']") ||
-        hit.el?.closest?.("label") ||
-        hit.el;
-      try {
-        (target || hit.el).click();
+      if (forceClickRadioEl(hit.el)) {
         return {
           ok: true,
-          via: "radio",
-          label: hit.label,
-          incomplete: !!hit.incomplete,
-          options: opts.map((o) => o.label.slice(0, 40)),
+          via: "step-outcome-radio",
+          label: "incomplete",
+          incomplete: true,
+          options: opts.map((o) => o.label),
         };
-      } catch {
-        /* try next root */
       }
     }
-    // Same hotkey as Grade incomplete when the option is focused
-    pressEditorKey("i");
-    return { ok: true, via: "hotkey-i", label: "incomplete", incomplete: true, options: null };
+    // Do NOT press "i" — Grade Incomplete shares that hotkey and would set G2.
+    return { ok: false, error: "step-outcome-incomplete-not-found" };
   }
 
   async function applyIncompleteStepToRange(range) {
     if (!range?.el) return { ok: false, error: "no-range" };
+    // Step Outcome lives on the Step instance panel — not Classes list alone
     try {
       range.el.click();
     } catch {
       return { ok: false, error: "click-failed" };
     }
-    await sleep(220);
-    return selectIncompleteStepOption();
+    await sleep(240);
+
+    let last = { ok: false };
+    for (let i = 0; i < 5; i += 1) {
+      try {
+        range.el.click();
+      } catch {
+        /* ignore */
+      }
+      await sleep(180);
+      // Ensure instance panel shows Step (not Trajectory/Grade)
+      const instance = normalizeLabel(
+        document.querySelector('[data-testid="instance-name"]')?.textContent || ""
+      ).toLowerCase();
+      if (instance !== "step") {
+        try {
+          range.el.click();
+        } catch {
+          /* ignore */
+        }
+        await sleep(200);
+      }
+      last = selectIncompleteStepOption();
+      await sleep(200);
+      const checked = findStepOutcomeIncompleteChecked();
+      if (checked.ok) {
+        return {
+          ok: true,
+          via: last.via || "step-outcome-radio",
+          label: "incomplete",
+          selected: last,
+          checked,
+        };
+      }
+      await sleep(120);
+    }
+    return {
+      ok: false,
+      error: "step-outcome-incomplete-not-applied",
+      selected: last,
+      label: rangeLabel(range.el),
+    };
+  }
+
+  /** After S2: select G2 Grade so the operator can pick the Grade value. */
+  async function selectGradeForOperator(tailStart) {
+    const total = getTotalFrames();
+    await focusPreferredGradeTile();
+    await sleep(40);
+    activateTrajectoryClass();
+    await sleep(120);
+    const grade =
+      (tailStart != null ? findGradeNearStart(tailStart, total) : null) ||
+      findPrimaryGradeRange();
+    if (grade?.el) {
+      try {
+        grade.el.click();
+      } catch {
+        /* ignore */
+      }
+      await sleep(180);
+    }
+    return { ok: !!grade?.el, grade, via: grade?.el ? "g2-or-primary" : "class-only" };
   }
 
   function activateStepClass() {
@@ -1299,7 +1452,7 @@
 
   /**
    * Grade value radios under Trajectory → Grade (DOM order), e.g.
-   * -1, 0, 1, 3, 4, 5, incomplete. Last entry is "incomplete".
+   * -1, 0, 1, 3, 4, 5, complete, incomplete.
    */
   function scrapeOrderedGradeValueOptions(root) {
     if (!root) return [];
@@ -1311,7 +1464,7 @@
       const t = normalizeLabel(raw);
       if (!t || t.length > 24) return;
       if (/^grade$/i.test(t) || /^step\b/i.test(t) || /^trajectory$/i.test(t)) return;
-      if (!/^-?\d+$/.test(t) && !/^incomplete$/i.test(t)) return;
+      if (!/^-?\d+$/.test(t) && !/^(complete|incomplete)$/i.test(t)) return;
       const key = t.toLowerCase();
       if (seen.has(key)) return;
       seen.add(key);
@@ -1340,46 +1493,93 @@
     return ordered;
   }
 
-  /**
-   * G2 (post-last-step tail) must use the last Grade option = "incomplete".
-   * Call with a Grade instance selected so the value radios are visible.
-   */
-  function selectIncompleteGradeOption() {
-    const panel = document.querySelector('[data-testid="object-left-panel"]');
-    const roots = [
-      panel,
+  function gradeValueRoots() {
+    return [
+      document.querySelector('[data-testid="object-left-panel"]'),
       document.querySelector('[data-testid="editor-sider"]'),
       document.querySelector('[data-testid="editor-sider-ontology-list"]')?.parentElement,
     ].filter(Boolean);
-
-    for (const root of roots) {
-      const opts = scrapeOrderedGradeValueOptions(root);
-      if (!opts.length) continue;
-      const hit =
-        opts.find((o) => /^incomplete$/i.test(o.label)) || opts[opts.length - 1];
-      if (!hit) continue;
-      const target =
-        hit.el?.querySelector?.("label.ant-radio-wrapper, label, input[type='radio']") ||
-        hit.el?.closest?.("label") ||
-        hit.el;
-      try {
-        (target || hit.el).click();
-        return {
-          ok: true,
-          via: "radio",
-          label: hit.label,
-          options: opts.map((o) => o.label),
-        };
-      } catch {
-        /* try next root */
-      }
-    }
-
-    // Screenshot hotkey for incomplete is I
-    pressEditorKey("i");
-    return { ok: true, via: "hotkey-i", label: "incomplete", options: null };
   }
 
+  function findGradeValueChecked(wantLabel) {
+    const re = new RegExp(`^${wantLabel}$`, "i");
+    for (const root of gradeValueRoots()) {
+      const opts = scrapeOrderedGradeValueOptions(root);
+      const hit = opts.find((o) => re.test(o.label));
+      if (hit && isRadioChecked(hit.el)) {
+        return { ok: true, hit, options: opts.map((o) => o.label) };
+      }
+    }
+    return { ok: false };
+  }
+
+  /** Click a radio/label even when ant-tree marks nodes disabled. */
+  function forceClickRadioEl(el) {
+    if (!el) return false;
+    const label = el.closest?.("label") || (el.matches?.("label") ? el : null) || el;
+    const input =
+      (el.matches?.('input[type="radio"]') && el) ||
+      el.querySelector?.('input[type="radio"]') ||
+      label?.querySelector?.('input[type="radio"]') ||
+      null;
+    try {
+      if (input) {
+        input.disabled = false;
+        input.removeAttribute?.("disabled");
+        input.click();
+      }
+    } catch {
+      /* ignore */
+    }
+    try {
+      label.click();
+    } catch {
+      /* ignore */
+    }
+    try {
+      const rect = (label || el).getBoundingClientRect();
+      const x = rect.left + Math.min(12, Math.max(4, rect.width / 2));
+      const y = rect.top + rect.height / 2;
+      for (const type of ["pointerdown", "mousedown", "mouseup", "click"]) {
+        (label || el).dispatchEvent(
+          new MouseEvent(type, { bubbles: true, cancelable: true, clientX: x, clientY: y, view: window })
+        );
+      }
+    } catch {
+      /* ignore */
+    }
+    return true;
+  }
+
+  /**
+   * G2 Grade value = Incomplete (last option: -1…5, incomplete).
+   * G1 deliberately leaves Grade unselected. Never use hotkey I during S2.
+   */
+  function selectIncompleteGradeOption() {
+    for (const root of gradeValueRoots()) {
+      const opts = scrapeOrderedGradeValueOptions(root);
+      if (!opts.length) continue;
+      // Prefer Incomplete in a Grade list (has numeric options) — not Step Outcome
+      const hasNumeric = opts.some((o) => /^-?\d+$/.test(o.label));
+      const hit = opts.find((o) => /^incomplete$/i.test(o.label));
+      if (!hit) continue;
+      if (!hasNumeric && opts.length <= 2) continue;
+      if (forceClickRadioEl(hit.el)) {
+        return {
+          ok: true,
+          via: "grade-incomplete-radio",
+          label: "incomplete",
+          options: opts.map((o) => o.label),
+        };
+      }
+    }
+    return { ok: false, error: "grade-incomplete-not-found", options: null };
+  }
+
+  /**
+   * G2 only: with Trajectory/G2 selected, set Grade Incomplete via hotkey I,
+   * then Done / Escape to commit. Call only after G2 bounds are final.
+   */
   async function applyIncompleteGradeToRange(range) {
     if (!range?.el) return { ok: false, error: "no-range" };
     try {
@@ -1388,7 +1588,32 @@
       return { ok: false, error: "click-failed" };
     }
     await sleep(220);
-    return selectIncompleteGradeOption();
+    await blurRangeFrameInputs();
+    await sleep(80);
+
+    // Prefer visible Incomplete radio; fall back to hotkey I (Grade panel only)
+    let via = "hotkey-i";
+    const radio = selectIncompleteGradeOption();
+    if (radio.ok) {
+      via = radio.via || "radio";
+    } else {
+      pressEditorKey("i");
+    }
+    await sleep(200);
+
+    const checked = findGradeValueChecked("incomplete");
+    const done = clickDoneIfPresent();
+    if (!done) pressEditorKey("Escape");
+    await sleep(120);
+
+    return {
+      ok: checked.ok || radio.ok || via === "hotkey-i",
+      via,
+      label: "incomplete",
+      checked,
+      radio,
+      done: !!done,
+    };
   }
 
   /** Find editable Range start / Range end inputs (instance edit panel). */
@@ -2053,10 +2278,7 @@
       pin = findGradeNearStart(at, total) || pin;
     }
 
-    // G2 = last Grade option in the selection array ("incomplete")
-    const gradeValue = await applyIncompleteGradeToRange(pin);
-    await sleep(80);
-
+    // Incomplete is applied after G2 bounds are final (not at pin-create time).
     if (findRangeBoundInputs() || pin) {
       return {
         ok: true,
@@ -2064,10 +2286,10 @@
         created: true,
         frame: at,
         range: pin,
-        gradeValue,
+        gradeValue: null,
       };
     }
-    return { ok: false, error: "create-tail-pin-failed", frame: at, gradeValue };
+    return { ok: false, error: "create-tail-pin-failed", frame: at, gradeValue: null };
   }
 
   /**
@@ -2087,8 +2309,7 @@
     if (!activated) return { ok: false, error: "no-step-class" };
     await sleep(180);
 
-    let selected = selectIncompleteStepOption();
-    await sleep(100);
+    // Do not set Step Outcome before the pin exists — Outcome radios need an instance.
 
     const jumped = await goToFrame(at);
     document.activeElement?.blur?.();
@@ -2129,12 +2350,10 @@
       }
       await sleep(220);
       pin = findStepTailByGeometry(at, total) || pin;
-      selected = selectIncompleteStepOption() || selected;
-      await sleep(80);
     }
 
     if (!pin?.el) {
-      return { ok: false, error: "create-step-tail-pin-failed", frame: at, selected };
+      return { ok: false, error: "create-step-tail-pin-failed", frame: at };
     }
     return {
       ok: true,
@@ -2142,7 +2361,6 @@
       created: true,
       frame: at,
       range: pin,
-      selected,
     };
   }
 
@@ -2222,8 +2440,8 @@
   }
 
   /**
-   * After G2 is complete: S2 = incomplete Step from lastStepEnd+1 → episode end.
-   * Finds pins by geometry (empty labels). Expands before setting incomplete. Esc.
+   * After G2 is complete: S2 span lastStepEnd+1 → episode end, then
+   * Step Outcome = Incomplete. Does not Esc — caller hands off to Grade.
    */
   async function ensureIncompleteStepTail({ tailStart, episodeEnd }) {
     const total = getTotalFrames();
@@ -2245,10 +2463,17 @@
     }
 
     let step = findTailStep();
-    if (isReady(step) && (step.incomplete || isIncompleteStepLabel(step.label))) {
-      pressEditorKey("Escape");
-      await sleep(80);
-      return { ok: true, skipped: true, reason: "step-tail-already-synced", step, label: "incomplete" };
+    // Already synced if span is right and Step Outcome Incomplete is checked
+    if (isReady(step)) {
+      try {
+        step.el.click();
+      } catch {
+        /* ignore */
+      }
+      await sleep(160);
+      if (findStepOutcomeIncompleteChecked().ok) {
+        return { ok: true, skipped: true, reason: "step-tail-already-synced", step, label: "incomplete" };
+      }
     }
 
     // Create pin at tailStart if missing / wrong start
@@ -2284,28 +2509,34 @@
       };
     }
 
-    // Incomplete only after a real span exists
-    const stepValue = await applyIncompleteStepToRange(step);
-    await sleep(80);
+    // Step Outcome → Incomplete (verify radio, not timeline label)
+    let stepValue = { ok: false };
+    for (let i = 0; i < 3; i += 1) {
+      step = findTailStep() || step;
+      stepValue = await applyIncompleteStepToRange(step);
+      await sleep(120);
+      if (stepValue.ok || findStepOutcomeIncompleteChecked().ok) {
+        stepValue = { ...stepValue, ok: true };
+        break;
+      }
+    }
 
     await blurRangeFrameInputs();
-    pressEditorKey("Escape");
-    await sleep(100);
+    await sleep(60);
 
     step = findTailStep() || step;
-    const ok =
-      isReady(step) &&
-      (step.incomplete || isIncompleteStepLabel(step.label) || stepValue?.ok);
+    const outcomeOk = stepValue.ok || findStepOutcomeIncompleteChecked().ok;
+    const ok = isReady(step) && outcomeOk;
     return {
       ok,
-      via: wrote.via || "expand+incomplete+esc",
+      via: wrote.via || "expand+step-outcome-incomplete",
       label: "incomplete",
       startFrame: tailStart,
       endFrame: episodeEnd,
       wrote,
       stepValue,
       step,
-      error: ok ? undefined : "step-tail-incomplete-or-bounds",
+      error: ok ? undefined : outcomeOk ? "step-tail-bounds" : "step-outcome-incomplete-or-bounds",
     };
   }
 
@@ -2714,7 +2945,7 @@
               }
             }
           }
-          // G2 value = last Grade option in the selection array ("incomplete")
+          // G2 Incomplete: after bounds are final → I → Done/Esc. S2 unwired for now.
           const tailForValue =
             findGradeNearStart(tailStart, total) || tailAfter || tail;
           let gradeValue = null;
@@ -2725,64 +2956,39 @@
           }
           primaryEnd = findPrimaryGradeRange()?.endFrame ?? endFrame;
 
-          // S2 ONLY after G2 is fully in place: incomplete Step (last option)
-          // from lastStepEnd+1 → episode end, then Esc.
-          if (wroteTail.ok !== false) {
-            wroteStepTail = await ensureIncompleteStepTail({
-              tailStart,
-              episodeEnd,
-            });
-          } else {
-            wroteStepTail = { ok: true, skipped: true, reason: "grade-tail-failed" };
-          }
+          // S2 kept in codebase but unwired — re-enable after G2 Incomplete is solid.
+          wroteStepTail = { ok: true, skipped: true, reason: "s2-unwired" };
         }
 
         const after = snapshot();
         lastAppliedKey = snap.key;
         await blurRangeFrameInputs();
-        pressEditorKey("Escape");
-        await sleep(60);
+        await sleep(40);
         if (!quiet) {
           const tailBit =
             wroteTail.skipped && wroteTail.reason === "no-tail-frames"
               ? ""
               : wroteTail.ok
-                ? ` + G2 ${tailStart}–${episodeEnd}`
+                ? ` + G2 incomplete ${tailStart}–${episodeEnd}`
                 : ` (G2 ${tailStart}–${episodeEnd} failed)`;
-          const stepTailBit =
-            wroteStepTail.skipped &&
-            (wroteStepTail.reason === "no-tail-frames" ||
-              wroteStepTail.reason === "grade-tail-failed")
-              ? ""
-              : wroteStepTail.ok
-                ? ` + S2 incomplete ${tailStart}–${episodeEnd}`
-                : ` (S2 failed)`;
           const msg = ensured.created
-            ? `Grade 0–${primaryEnd}${tailBit}${stepTailBit}`
-            : `Grade set 0–${primaryEnd}${tailBit}${stepTailBit}`;
+            ? `Grade 0–${primaryEnd}${tailBit}`
+            : `Grade set 0–${primaryEnd}${tailBit}`;
           if (lastToastKey !== msg) {
             lastToastKey = msg;
-            showToast(
-              msg,
-              wroteTail.ok === false || wroteStepTail.ok === false ? "warn" : "ok"
-            );
+            showToast(msg, wroteTail.ok === false ? "warn" : "ok");
           }
         }
         return {
-          ok: wroteTail.ok !== false && wroteStepTail.ok !== false,
-          method: "ensure+range-inputs+tail+step-tail",
+          ok: wroteTail.ok !== false,
+          method: "ensure+range-inputs+tail",
           snap: after,
           ensured,
           wrote,
           wroteTail,
           wroteStepTail,
           primaryEnd,
-          error:
-            wroteTail.ok === false
-              ? wroteTail.error
-              : wroteStepTail.ok === false
-                ? wroteStepTail.error
-                : undefined,
+          error: wroteTail.ok === false ? wroteTail.error : undefined,
         };
       }
 

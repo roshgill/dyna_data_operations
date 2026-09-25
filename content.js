@@ -1,5 +1,5 @@
 (() => {
-  const VERSION = "0.18.11";
+  const VERSION = "0.18.18";
   const STORAGE_KEY = "preferredCameras";
   const LAYOUT_KEY = "preferredMosaicLayout";
   const PREFERRED_ACTIVE_TILE = "cam_high";
