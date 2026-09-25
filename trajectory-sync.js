@@ -2,7 +2,7 @@
 // Write path: Encord classification UI (frame jump + C/V/M or Range start/end inputs).
 // No timeline draw-drag / alt-click / shift-click (those create single-frame pins).
 (() => {
-  const VERSION = "0.18.20-grade";
+  const VERSION = "0.18.24-grade";
   const STORAGE_ENABLED = "autoGradeEnabled";
   // v2 key — invalidates bad caches that stored lastStepNum=2 from truncated scrapes
   const STORAGE_DEFINED_STEPS = "gradeSyncDefinedStepsV2";
@@ -681,25 +681,19 @@
     };
   }
 
-  /** After S2: select G2 Grade so the operator can pick the Grade value. */
-  async function selectGradeForOperator(tailStart) {
-    const total = getTotalFrames();
-    await focusPreferredGradeTile();
-    await sleep(40);
-    activateTrajectoryClass();
-    await sleep(120);
-    const grade =
-      (tailStart != null ? findGradeNearStart(tailStart, total) : null) ||
-      findPrimaryGradeRange();
-    if (grade?.el) {
-      try {
-        grade.el.click();
-      } catch {
-        /* ignore */
-      }
-      await sleep(180);
+  /** After full sync: select existing G1 only — never arm Trajectory create. */
+  async function selectGradeForOperator(_tailStart) {
+    const grade = findPrimaryGradeRange();
+    if (!grade?.el) {
+      return { ok: false, skipped: true, reason: "no-g1" };
     }
-    return { ok: !!grade?.el, grade, via: grade?.el ? "g2-or-primary" : "class-only" };
+    try {
+      grade.el.click();
+    } catch {
+      return { ok: false, error: "g1-click-failed" };
+    }
+    await sleep(180);
+    return { ok: true, grade, via: "g1-click" };
   }
 
   function activateStepClass() {
@@ -3016,6 +3010,12 @@
           }
         }
 
+        // Hand focus to G1 only (never G2)
+        let gradeHandoff = null;
+        if (wroteTail.ok !== false && wroteStepTail.ok !== false) {
+          gradeHandoff = await selectGradeForOperator();
+        }
+
         const after = snapshot();
         lastAppliedKey = snap.key;
         await blurRangeFrameInputs();
@@ -3055,6 +3055,7 @@
           wrote,
           wroteTail,
           wroteStepTail,
+          gradeHandoff,
           primaryEnd,
           error:
             wroteTail.ok === false
