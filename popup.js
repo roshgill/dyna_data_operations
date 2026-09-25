@@ -56,6 +56,7 @@ async function refreshStatus() {
   setStatus("No camera layout saved yet. Adjust your cameras, then save.");
 }
 
+
 async function refreshAutoLayoutToggle() {
   try {
     autoLayoutEl.checked = await LayoutOps.getAutoLayoutEnabled();
@@ -73,17 +74,15 @@ async function refreshGradeStatus() {
     }
     autoGradeEl.checked = result.enabled !== false;
     const defined = result.definedSteps || result.snapshot?.definedSteps;
-    const definedLabel =
-      defined?.lastStepNum != null ? `Defined last Step: ${defined.lastStepNum}. ` : "";
     const snap = result.snapshot;
     if (!snap?.ready) {
       if (snap?.reason === "last-defined-step-not-on-timeline") {
-        gradeStatusEl.textContent = `${definedLabel}Waiting for Step ${defined?.lastStepNum} on the timeline…`;
+        gradeStatusEl.textContent = `Waiting for Step ${defined?.lastStepNum} on the timeline…`;
         return;
       }
       if (snap?.reason === "no-last-step" || snap?.reason === "no-defined-steps") {
-        gradeStatusEl.textContent = definedLabel
-          ? `${definedLabel}Waiting for that Step on the timeline…`
+        gradeStatusEl.textContent = defined?.lastStepNum
+          ? "Waiting for that Step on the timeline…"
           : "Discovering Classes → Step list…";
         return;
       }
@@ -92,17 +91,24 @@ async function refreshGradeStatus() {
     }
     const step = snap.lastStep;
     const grade = snap.grade;
+    const tail = snap.tailTarget;
+    const tailGrade = snap.tailGrade;
+    const tailBit = tail
+      ? tailGrade && !snap.needsSync
+        ? ` Tail ${tailGrade.startFrame}–${tailGrade.endFrame}.`
+        : ` Tail → ${tail.startFrame}–${tail.endFrame}.`
+      : "";
     if (!grade) {
-      gradeStatusEl.textContent = `${definedLabel}Step ${step.stepNum} ends at frame ${step.endFrame}. Sync uses Range start/end.`;
+      gradeStatusEl.textContent = `Step ${step.stepNum} ends at frame ${step.endFrame}. Sync uses Range start/end.${tailBit}`;
       return;
     }
     if ((grade.span ?? grade.endFrame - grade.startFrame) <= 2) {
-      gradeStatusEl.textContent = `${definedLabel}Step ${step.stepNum} → 0–${step.endFrame}. Tiny Grade pin — Sync will expand it.`;
+      gradeStatusEl.textContent = `Step ${step.stepNum} → 0–${step.endFrame}. Tiny Grade pin — Sync will expand it.${tailBit}`;
       return;
     }
     gradeStatusEl.textContent = snap.needsSync
-      ? `${definedLabel}Step ${step.stepNum} → 0–${step.endFrame}. Grade is ${grade.startFrame}–${grade.endFrame} (will sync).`
-      : `${definedLabel}Synced: Grade 0–${grade.endFrame} matches step ${step.stepNum}.`;
+      ? `Step ${step.stepNum} → 0–${step.endFrame}. Grade is ${grade.startFrame}–${grade.endFrame} (will sync).${tailBit}`
+      : `Synced: Grade 0–${grade.endFrame} matches step ${step.stepNum}.${tailBit}`;
   } catch (err) {
     gradeStatusEl.textContent = err.message || String(err);
   }
@@ -136,6 +142,7 @@ restoreBtn.addEventListener("click", async () => {
   }
 });
 
+
 autoLayoutEl.addEventListener("change", async () => {
   try {
     await LayoutOps.setAutoLayoutEnabled(autoLayoutEl.checked);
@@ -157,14 +164,20 @@ autoGradeEl.addEventListener("change", async () => {
 
 gradeSyncBtn.addEventListener("click", async () => {
   setBusy(true);
-  setStatus("Syncing Grade…");
+  setStatus("Focusing editor…");
   try {
-    const result = await LayoutOps.gradeSyncNow(await resolveTargetTab());
+    const tab = await resolveTargetTab();
+    // Background focuses the Encord tab first so Grade create isn't stuck on an unfocused page.
+    const result = await chrome.runtime.sendMessage({ type: "OPS_GRADE_SYNC_NOW", tab });
     if (result?.ok) {
       const end = result.snap?.target?.endFrame ?? result.snap?.lastStep?.endFrame;
       const step = result.snap?.lastStep?.stepNum;
-      const how = result.method === "range-inputs" ? "Range inputs" : "C/V/M";
-      setStatus(`Grade 0–${end} (step ${step}) via ${how}.`);
+      const tail = result.snap?.tailTarget || result.wroteTail?.want;
+      const tailPart =
+        tail && result.wroteTail?.ok !== false && result.wroteTail?.reason !== "no-tail-frames"
+          ? ` + ${tail.startFrame ?? result.snap?.tailGrade?.startFrame}–${tail.endFrame ?? result.snap?.tailGrade?.endFrame}`
+          : "";
+      setStatus(`Grade 0–${end}${tailPart} (step ${step}).`);
     } else {
       const why = result?.error || result?.reason || "Grade sync skipped.";
       setStatus(why);

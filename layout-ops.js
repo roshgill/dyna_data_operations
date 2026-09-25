@@ -396,6 +396,28 @@ const LayoutOps = (() => {
     return result;
   }
 
+  async function focusEncordTab(tab) {
+    const active = tab?.id ? tab : await requireEncordTab(tab);
+    if (!active?.id) {
+      throw new Error("Open an Encord label editor tab first (app.encord.com).");
+    }
+    try {
+      await chrome.tabs.update(active.id, { active: true });
+    } catch {
+      /* tab may already be active */
+    }
+    if (typeof active.windowId === "number") {
+      try {
+        await chrome.windows.update(active.windowId, { focused: true });
+      } catch {
+        /* ignore */
+      }
+    }
+    // Let Chromium move OS + document focus into the editor before UI automation.
+    await new Promise((r) => setTimeout(r, 200));
+    return active;
+  }
+
   async function gradeStatus(tab) {
     const active = await requireEncordTab(tab);
     return chrome.tabs.sendMessage(active.id, { type: "GRADE_SYNC_STATUS" });
@@ -403,6 +425,7 @@ const LayoutOps = (() => {
 
   async function gradeSyncNow(tab) {
     const active = await requireEncordTab(tab);
+    await focusEncordTab(active);
     return chrome.tabs.sendMessage(active.id, { type: "GRADE_SYNC_NOW" });
   }
 
