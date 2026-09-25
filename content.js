@@ -1,5 +1,5 @@
 (() => {
-  const VERSION = "0.18.18";
+  const VERSION = "0.18.20";
   const STORAGE_KEY = "preferredCameras";
   const LAYOUT_KEY = "preferredMosaicLayout";
   const PREFERRED_ACTIVE_TILE = "cam_high";
@@ -1064,12 +1064,19 @@
       const testId = el.getAttribute("data-testid");
       const role = el.getAttribute("role");
       const aria = el.getAttribute("aria-label");
-      const ownText = normalizeLabel(
+      let ownText = normalizeLabel(
         [...el.childNodes]
           .filter((n) => n.nodeType === Node.TEXT_NODE)
           .map((n) => n.textContent)
           .join(" ")
       ).slice(0, textMax);
+      // Radios / tree titles often have no direct text node — pull label text
+      if (!ownText && (el.matches?.("label, [role='radio'], .ant-tree-title") || role === "treeitem")) {
+        ownText = normalizeLabel(el.textContent || "").slice(0, textMax);
+      }
+      const checked = el.matches?.("label.ant-radio-wrapper, label, [role='radio']")
+        ? isRadioCheckedEl(el)
+        : false;
       const value = el instanceof HTMLInputElement ? el.value : "";
       const style = (el.getAttribute("style") || "").slice(0, 100);
       const cls = String(el.className || "")
@@ -1083,6 +1090,7 @@
         role ? `role=${role}` : null,
         aria ? `aria="${aria.slice(0, 60)}"` : null,
         ownText ? `text="${ownText}"` : null,
+        checked ? "CHECKED" : null,
         value !== "" ? `value="${String(value).slice(0, 40)}"` : null,
         style ? `style="${style}"` : null,
         cls ? `class=${cls}` : null,
@@ -1132,6 +1140,190 @@
       if (out.length >= limit) break;
     }
     return out;
+  }
+
+  function isRadioCheckedEl(el) {
+    if (!el) return false;
+    const input =
+      (el.matches?.('input[type="radio"]') && el) ||
+      el.querySelector?.('input[type="radio"]') ||
+      null;
+    if (input?.checked) return true;
+    const wrap = el.closest?.("label.ant-radio-wrapper, label, [role='radio']") || el;
+    if (wrap.classList?.contains("ant-radio-wrapper-checked")) return true;
+    if (wrap.querySelector?.(".ant-radio-checked, [aria-checked='true']")) return true;
+    if (wrap.getAttribute?.("aria-checked") === "true") return true;
+    return false;
+  }
+
+  function radioLabelText(el) {
+    if (!el) return "";
+    const title = el.closest?.("[role='treeitem']")?.querySelector?.(".ant-tree-title");
+    const raw =
+      title?.textContent ||
+      el.querySelector?.(".ant-radio + span, span:not(.ant-radio)")?.textContent ||
+      el.textContent ||
+      "";
+    return normalizeLabel(raw).slice(0, 200);
+  }
+
+  /**
+   * Left-panel classification dump — radios/treeitems with checked state.
+   * Needed for S2: Step identity (first) + Incomplete (last / Outcome).
+   */
+  function scanClassificationPanel() {
+    const lines = [];
+    const panel =
+      document.querySelector('[data-testid="object-left-panel"]') ||
+      document.querySelector('[data-testid="editor-sider"]');
+    const instanceName = normalizeLabel(
+      document.querySelector('[data-testid="instance-name"]')?.textContent || ""
+    );
+    const rangeStart = document.querySelector('input[aria-label="Range start"]');
+    const rangeEnd = document.querySelector('input[aria-label="Range end"]');
+    const totalFrames = Number(
+      normalizeLabel(document.querySelector('[data-testid="totalFrames"]')?.textContent || "") ||
+        NaN
+    );
+
+    lines.push(`instance-name: ${instanceName || "(none)"}`);
+    lines.push(
+      `Range: ${rangeStart?.value ?? "?"}–${rangeEnd?.value ?? "?"}  totalFrames=${
+        Number.isFinite(totalFrames) ? totalFrames : "?"
+      }`
+    );
+
+    const kbds = [...(panel || document).querySelectorAll("kbd")]
+      .map((k) => normalizeLabel(k.textContent))
+      .filter(Boolean);
+    lines.push(`hotkeys: ${kbds.length ? kbds.join(" ") : "(none)"}`);
+
+    const doneBtn = [...(panel || document).querySelectorAll("button")].find((b) =>
+      /^done(\s*esc)?$/i.test(normalizeLabel(b.textContent))
+    );
+    lines.push(`Done button: ${doneBtn ? normalizeLabel(doneBtn.textContent) : "(none)"}`);
+
+    // Treeitems (preferred — preserves Step nesting / Outcome children)
+    const treeItems = [...(panel || document).querySelectorAll('[role="treeitem"]')].filter(
+      (el) => {
+        const style = el.getAttribute("style") || "";
+        if (/display:\s*none/i.test(style)) return false;
+        return !!el.querySelector("label.ant-radio-wrapper, label, .ant-radio, [role='radio']");
+      }
+    );
+
+    lines.push("");
+    lines.push(`--- treeitem radios (${treeItems.length}) ---`);
+    treeItems.forEach((item, i) => {
+      const indentUnits = item.querySelectorAll(".ant-tree-indent-unit").length;
+      const label =
+        radioLabelText(item.querySelector("label.ant-radio-wrapper, label, [role='radio']") || item) ||
+        normalizeLabel(item.querySelector(".ant-tree-title")?.textContent || "").slice(0, 200);
+      const checked = isRadioCheckedEl(item.querySelector("label.ant-radio-wrapper, label") || item);
+      const disabled =
+        item.classList.contains("ant-tree-treenode-disabled") ||
+        !!item.closest(".ant-tree-disabled");
+      const open = item.classList.contains("ant-tree-treenode-switcher-open");
+      const closed = item.classList.contains("ant-tree-treenode-switcher-close");
+      const leaf = item.classList.contains("ant-tree-treenode-leaf");
+      const cls = String(item.className || "")
+        .split(/\s+/)
+        .filter((c) => /checked|disabled|open|close|leaf|selected/i.test(c))
+        .slice(0, 6)
+        .join(" ");
+      lines.push(
+        `${i}: depth=${indentUnits} ${checked ? "CHECKED" : "·"} ${disabled ? "disabled" : "edit"} ${
+          open ? "open" : closed ? "closed" : leaf ? "leaf" : ""
+        } | "${label}" | ${cls}`
+      );
+    });
+
+    // Flat radio labels (catch anything outside tree)
+    const radios = [
+      ...(panel || document).querySelectorAll("label.ant-radio-wrapper, [role='radio']"),
+      ...[...(panel || document).querySelectorAll("label")].filter((el) =>
+        el.querySelector('input[type="radio"]')
+      ),
+    ];
+    const seenRadio = new Set();
+    lines.push("");
+    lines.push(`--- flat radios in panel ---`);
+    let radioIdx = 0;
+    for (const el of radios) {
+      if (seenRadio.has(el)) continue;
+      seenRadio.add(el);
+      const label = radioLabelText(el);
+      if (!label) continue;
+      const checked = isRadioCheckedEl(el);
+      const inTree = !!el.closest('[role="treeitem"]');
+      lines.push(
+        `${radioIdx}: ${checked ? "CHECKED" : "·"} ${inTree ? "tree" : "loose"} | "${label.slice(0, 160)}"`
+      );
+      radioIdx += 1;
+    }
+    lines.push(`(count: ${radioIdx})`);
+
+    // Heuristic groups for S2 wiring
+    const labels = treeItems.map((item) =>
+      normalizeLabel(
+        item.querySelector(".ant-tree-title")?.textContent || item.textContent || ""
+      ).slice(0, 160)
+    );
+    const stepIds = labels.filter((t) => /^step\s*\d+/i.test(t));
+    const outcomes = labels.filter((t) => /^(pass|fail|incomplete)[yui]?$/i.test(t.replace(/\s+/g, "")));
+    const grades = labels.filter(
+      (t) => /^-?\d+$/.test(t) || /^incomplete[i]?$/i.test(t.replace(/\s+/g, ""))
+    );
+    const incompleteHits = labels.filter((t) => /^incomplete[i]?$/i.test(t.replace(/\s+/g, "")));
+    lines.push("");
+    lines.push("--- S2 heuristics ---");
+    lines.push(`step-identity options (Step N): ${stepIds.length ? stepIds.map((t) => t.slice(0, 60)).join(" || ") : "(none)"}`);
+    lines.push(`first step option: ${stepIds[0] ? stepIds[0].slice(0, 80) : "(none)"}`);
+    lines.push(`last step-identity option: ${stepIds.length ? stepIds[stepIds.length - 1].slice(0, 80) : "(none)"}`);
+    lines.push(`Pass/Fail/Incomplete group: ${outcomes.length ? outcomes.join(", ") : "(none)"}`);
+    lines.push(`Incomplete hits: ${incompleteHits.length ? incompleteHits.join(", ") : "(none)"}`);
+    lines.push(
+      `numeric/Incomplete grade-like: ${grades.length ? grades.join(", ") : "(none)"}`
+    );
+
+    // Selected timeline ranges with frame math
+    lines.push("");
+    lines.push("--- timeline ranges (frame math) ---");
+    for (const rowId of ["row-Trajectory", "row-Step"]) {
+      const row = findByTestId(rowId);
+      if (!row) {
+        lines.push(`${rowId}: (missing)`);
+        continue;
+      }
+      const ranges = [...row.querySelectorAll('[data-testid="range"]')];
+      ranges.forEach((r, i) => {
+        const style = r.getAttribute("style") || "";
+        const left = Number((/left:\s*([\d.]+)%/.exec(style) || [])[1]);
+        const width = Number((/width:\s*([\d.]+)%/.exec(style) || [])[1]);
+        const start =
+          Number.isFinite(totalFrames) && Number.isFinite(left)
+            ? Math.round((left / 100) * totalFrames)
+            : "?";
+        const end =
+          Number.isFinite(totalFrames) && Number.isFinite(left) && Number.isFinite(width)
+            ? Math.round(((left + width) / 100) * totalFrames)
+            : "?";
+        const label = normalizeLabel(r.textContent).slice(0, 80);
+        const selected =
+          /z-20|!text-white/.test(String(r.className || "")) ||
+          /rgb\(74,\s*20,\s*169\)/.test(style) ||
+          [...r.querySelectorAll('[data-testid="left-handle"], [data-testid="right-handle"]')].some(
+            (h) => /opacity:\s*1\b/.test(h.getAttribute("style") || "")
+          );
+        lines.push(
+          `${rowId}[${i}]: ${start}–${end} left=${left}% w=${width}% ${
+            selected ? "SELECTED" : ""
+          } | "${label}"`
+        );
+      });
+    }
+
+    return lines;
   }
 
   function scanFullEpisodeDom() {
@@ -1258,11 +1450,16 @@
       n = walker.nextNode();
     }
 
+    const classificationPanel = scanClassificationPanel();
+
     const report = [
       `v${VERSION} FULL-EPISODE-DOM  ${location.href}`,
       `title: ${document.title}`,
       `currentFrame: ${currentFrame}  totalFrames: ${totalFrames}`,
       `body children: ${document.body?.children?.length ?? 0}`,
+      "",
+      "=== CLASSIFICATION PANEL (S2 / Grade radios) ===",
+      ...classificationPanel,
       "",
       "=== ALL data-testid (unique) ===",
       ...testIds.map(
@@ -1297,6 +1494,7 @@
         testIds: testIds.length,
         interactive: interactive.length,
         signalNodes: bodySignal.length,
+        classificationPanelLines: classificationPanel.length,
         currentFrame,
         totalFrames,
         hasRowStep: !!findByTestId("row-step"),

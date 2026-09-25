@@ -2,7 +2,7 @@
 // Write path: Encord classification UI (frame jump + C/V/M or Range start/end inputs).
 // No timeline draw-drag / alt-click / shift-click (those create single-frame pins).
 (() => {
-  const VERSION = "0.18.18-grade";
+  const VERSION = "0.18.20-grade";
   const STORAGE_ENABLED = "autoGradeEnabled";
   // v2 key — invalidates bad caches that stored lastStepNum=2 from truncated scrapes
   const STORAGE_DEFINED_STEPS = "gradeSyncDefinedStepsV2";
@@ -452,8 +452,17 @@
     ].filter(Boolean);
   }
 
+  /**
+   * Pass / Fail / Incomplete — allow glued hotkey suffix (PassY, FailU, IncompleteI).
+   */
+  function stepOutcomeChoiceKey(raw) {
+    const t = normalizeLabel(raw).replace(/\s+/g, "");
+    const m = t.match(/^(pass|fail|incomplete)([yui])?$/i);
+    return m ? m[1].toLowerCase() : null;
+  }
+
   function isStepOutcomeChoiceLabel(raw) {
-    return /^(pass|fail|incomplete)$/i.test(normalizeLabel(raw));
+    return !!stepOutcomeChoiceKey(raw);
   }
 
   function isRadioChecked(el) {
@@ -490,17 +499,20 @@
           .filter((el) => {
             if (isInTimelineChrome(el) || isInLabelsPane(el)) return false;
             const t = normalizeLabel(el.textContent);
-            return t.length > 0 && t.length < 24 && isStepOutcomeChoiceLabel(t);
+            return t.length > 0 && t.length < 28 && isStepOutcomeChoiceLabel(t);
           })
-          .map((el, order) => ({ label: normalizeLabel(el.textContent), el, order }));
-        const names = new Set(labels.map((o) => o.label.toLowerCase()));
+          .map((el, order) => ({
+            label: stepOutcomeChoiceKey(el.textContent),
+            el,
+            order,
+          }));
+        const names = new Set(labels.map((o) => o.label));
         if (names.has("incomplete") && (names.has("pass") || names.has("fail"))) {
           const dedup = [];
           const seen = new Set();
           for (const o of labels) {
-            const k = o.label.toLowerCase();
-            if (seen.has(k)) continue;
-            seen.add(k);
+            if (seen.has(o.label)) continue;
+            seen.add(o.label);
             dedup.push(o);
           }
           return dedup;
@@ -513,7 +525,7 @@
       (el) => {
         if (isInTimelineChrome(el) || isInLabelsPane(el)) return false;
         const t = normalizeLabel(el.textContent);
-        return t.length > 0 && t.length < 24 && isStepOutcomeChoiceLabel(t);
+        return t.length > 0 && t.length < 28 && isStepOutcomeChoiceLabel(t);
       }
     );
     if (!labels.length) return [];
@@ -527,16 +539,15 @@
         el.parentElement;
       const key = parent || el;
       if (!groups.has(key)) groups.set(key, []);
-      const t = normalizeLabel(el.textContent);
-      const keyLabel = t.toLowerCase();
-      if (groups.get(key).some((o) => o.label.toLowerCase() === keyLabel)) continue;
-      groups.get(key).push({ label: t, el, order: groups.get(key).length });
+      const keyLabel = stepOutcomeChoiceKey(el.textContent);
+      if (!keyLabel || groups.get(key).some((o) => o.label === keyLabel)) continue;
+      groups.get(key).push({ label: keyLabel, el, order: groups.get(key).length });
     }
 
     // Prefer a group that looks like Step Outcome (has Incomplete + Pass or Fail)
     let best = null;
     for (const opts of groups.values()) {
-      const names = new Set(opts.map((o) => o.label.toLowerCase()));
+      const names = new Set(opts.map((o) => o.label));
       if (!names.has("incomplete")) continue;
       if (!names.has("pass") && !names.has("fail")) continue;
       if (!best || opts.length > best.length) best = opts;
@@ -547,10 +558,37 @@
   function findStepOutcomeIncompleteChecked() {
     for (const root of stepSelectionRoots()) {
       const opts = scrapeStepOutcomeOptions(root);
-      const hit = opts.find((o) => /^incomplete$/i.test(o.label));
+      const hit = opts.find((o) => o.label === "incomplete");
       if (hit && isRadioChecked(hit.el)) return { ok: true, hit, options: opts.map((o) => o.label) };
     }
     return { ok: false };
+  }
+
+  /** Step identity = first entry in ordered Step options (Step 1). */
+  function selectFirstStepIdentityOption() {
+    for (const root of stepSelectionRoots()) {
+      const opts = scrapeOrderedStepOptions(root);
+      if (!opts.length) continue;
+      const first = firstDefinedFromSteps(opts);
+      if (!first?.el) continue;
+      if (isRadioChecked(first.el)) {
+        return {
+          ok: true,
+          via: "already-checked",
+          stepNum: first.stepNum,
+          label: first.label,
+        };
+      }
+      if (forceClickRadioEl(first.el)) {
+        return {
+          ok: true,
+          via: "step-identity-radio",
+          stepNum: first.stepNum,
+          label: first.label,
+        };
+      }
+    }
+    return { ok: false, error: "first-step-not-found" };
   }
 
   /**
@@ -561,7 +599,7 @@
     for (const root of stepSelectionRoots()) {
       const opts = scrapeStepOutcomeOptions(root);
       if (!opts.length) continue;
-      const hit = opts.find((o) => /^incomplete$/i.test(o.label));
+      const hit = opts.find((o) => o.label === "incomplete");
       if (!hit) continue;
       if (forceClickRadioEl(hit.el)) {
         return {
@@ -577,9 +615,12 @@
     return { ok: false, error: "step-outcome-incomplete-not-found" };
   }
 
+  /**
+   * S2 value: Step 1 (first identity) + Step Outcome Incomplete, then Done/Esc.
+   * Call only with the S2 Step instance selected — never while Grade is focused.
+   */
   async function applyIncompleteStepToRange(range) {
     if (!range?.el) return { ok: false, error: "no-range" };
-    // Step Outcome lives on the Step instance panel — not Classes list alone
     try {
       range.el.click();
     } catch {
@@ -587,7 +628,8 @@
     }
     await sleep(240);
 
-    let last = { ok: false };
+    let lastStepId = { ok: false };
+    let lastOutcome = { ok: false };
     for (let i = 0; i < 5; i += 1) {
       try {
         range.el.click();
@@ -595,7 +637,6 @@
         /* ignore */
       }
       await sleep(180);
-      // Ensure instance panel shows Step (not Trajectory/Grade)
       const instance = normalizeLabel(
         document.querySelector('[data-testid="instance-name"]')?.textContent || ""
       ).toLowerCase();
@@ -607,16 +648,26 @@
         }
         await sleep(200);
       }
-      last = selectIncompleteStepOption();
+
+      lastStepId = selectFirstStepIdentityOption();
+      await sleep(180);
+      lastOutcome = selectIncompleteStepOption();
       await sleep(200);
       const checked = findStepOutcomeIncompleteChecked();
-      if (checked.ok) {
+      if (checked.ok && lastStepId.ok) {
+        await blurRangeFrameInputs();
+        await sleep(60);
+        const done = clickDoneIfPresent();
+        if (!done) pressEditorKey("Escape");
+        await sleep(120);
         return {
           ok: true,
-          via: last.via || "step-outcome-radio",
+          via: lastOutcome.via || "step-outcome-radio",
           label: "incomplete",
-          selected: last,
+          stepIdentity: lastStepId,
+          selected: lastOutcome,
           checked,
+          done: !!done,
         };
       }
       await sleep(120);
@@ -624,7 +675,8 @@
     return {
       ok: false,
       error: "step-outcome-incomplete-not-applied",
-      selected: last,
+      stepIdentity: lastStepId,
+      selected: lastOutcome,
       label: rangeLabel(range.el),
     };
   }
@@ -2440,8 +2492,8 @@
   }
 
   /**
-   * After G2 is complete: S2 span lastStepEnd+1 → episode end, then
-   * Step Outcome = Incomplete. Does not Esc — caller hands off to Grade.
+   * After G2 Incomplete is committed: S2 span lastStepEnd+1 → episode end,
+   * Step 1 identity + Step Outcome Incomplete, then Done/Esc.
    */
   async function ensureIncompleteStepTail({ tailStart, episodeEnd }) {
     const total = getTotalFrames();
@@ -2945,7 +2997,7 @@
               }
             }
           }
-          // G2 Incomplete: after bounds are final → I → Done/Esc. S2 unwired for now.
+          // G2 Incomplete: after bounds are final → I → Done/Esc.
           const tailForValue =
             findGradeNearStart(tailStart, total) || tailAfter || tail;
           let gradeValue = null;
@@ -2956,8 +3008,12 @@
           }
           primaryEnd = findPrimaryGradeRange()?.endFrame ?? endFrame;
 
-          // S2 kept in codebase but unwired — re-enable after G2 Incomplete is solid.
-          wroteStepTail = { ok: true, skipped: true, reason: "s2-unwired" };
+          // S2: same span as G2 → Step 1 + Step Outcome Incomplete → Done/Esc
+          if (wroteTail.ok !== false) {
+            wroteStepTail = await ensureIncompleteStepTail({ tailStart, episodeEnd });
+          } else {
+            wroteStepTail = { ok: false, skipped: true, reason: "g2-failed" };
+          }
         }
 
         const after = snapshot();
@@ -2971,16 +3027,28 @@
               : wroteTail.ok
                 ? ` + G2 incomplete ${tailStart}–${episodeEnd}`
                 : ` (G2 ${tailStart}–${episodeEnd} failed)`;
+          const stepBit =
+            wroteStepTail.skipped &&
+            (wroteStepTail.reason === "no-step-tail-frames" ||
+              wroteStepTail.reason === "no-tail-frames" ||
+              wroteStepTail.reason === "g2-failed")
+              ? ""
+              : wroteStepTail.ok
+                ? ` + S2 incomplete ${tailStart}–${episodeEnd}`
+                : ` (S2 failed)`;
           const msg = ensured.created
-            ? `Grade 0–${primaryEnd}${tailBit}`
-            : `Grade set 0–${primaryEnd}${tailBit}`;
+            ? `Grade 0–${primaryEnd}${tailBit}${stepBit}`
+            : `Grade set 0–${primaryEnd}${tailBit}${stepBit}`;
           if (lastToastKey !== msg) {
             lastToastKey = msg;
-            showToast(msg, wroteTail.ok === false ? "warn" : "ok");
+            showToast(
+              msg,
+              wroteTail.ok === false || wroteStepTail.ok === false ? "warn" : "ok"
+            );
           }
         }
         return {
-          ok: wroteTail.ok !== false,
+          ok: wroteTail.ok !== false && wroteStepTail.ok !== false,
           method: "ensure+range-inputs+tail",
           snap: after,
           ensured,
@@ -2988,7 +3056,12 @@
           wroteTail,
           wroteStepTail,
           primaryEnd,
-          error: wroteTail.ok === false ? wroteTail.error : undefined,
+          error:
+            wroteTail.ok === false
+              ? wroteTail.error
+              : wroteStepTail.ok === false
+                ? wroteStepTail.error
+                : undefined,
         };
       }
 
