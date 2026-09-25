@@ -2,7 +2,7 @@
 // Write path: Encord classification UI (frame jump + C/V/M or Range start/end inputs).
 // No timeline draw-drag / alt-click / shift-click (those create single-frame pins).
 (() => {
-  const VERSION = "0.18.5-grade";
+  const VERSION = "0.18.7-grade";
   const STORAGE_ENABLED = "autoGradeEnabled";
   // v2 key — invalidates bad caches that stored lastStepNum=2 from truncated scrapes
   const STORAGE_DEFINED_STEPS = "gradeSyncDefinedStepsV2";
@@ -547,7 +547,122 @@
 
   function episodeLastFrame(totalFrames = getTotalFrames()) {
     if (!totalFrames) return null;
-    return Math.max(0, totalFrames - 1);
+    // Encord's totalFrames label is the last frame index (not count-1).
+    // Targeting total-1 left G2 permanently one frame short of episode end.
+    return totalFrames;
+  }
+
+  /**
+   * Extend only the right edge of an existing Grade to wantEnd (no Fill / start writes).
+   * Used after G1 restore, which often leaves G2 at episodeEnd - 1.
+   */
+  async function extendGradeEndOnly(preferRange, wantEnd, { matchStart } = {}) {
+    const total = getTotalFrames();
+    const targetEnd = Math.min(
+      Math.max(0, Math.floor(wantEnd)),
+      total || Math.floor(wantEnd)
+    );
+    let active =
+      (preferRange?.el && withGradeFrames(describeRange(preferRange.el) || preferRange, total)) ||
+      findGradeNearStart(matchStart ?? preferRange?.startFrame, total);
+    if (!active?.el) return { ok: false, error: "no-grade-to-extend" };
+
+    // Refuse to extend the primary when caller intended a tail instance.
+    if (matchStart > 1 && (active.startFrame ?? 0) <= 1) {
+      return { ok: false, error: "extend-resolved-to-primary" };
+    }
+
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      try {
+        active.el.click();
+      } catch {
+        return { ok: false, error: "click-failed" };
+      }
+      await sleep(160);
+      const geo = timelineBounds(active);
+      if (!geo) return { ok: false, error: "no-geo" };
+      if (Math.abs(geo.endFrame - targetEnd) <= BOUND_EPS) {
+        // Also confirm Range end input when present — CSS can lag or lie near 100%.
+        const bounds = findRangeBoundInputs();
+        const endVal = bounds
+          ? Number(String(bounds.end.value || "").replace(/[^\d]/g, ""))
+          : null;
+        if (endVal == null || !Number.isFinite(endVal) || Math.abs(endVal - targetEnd) <= BOUND_EPS) {
+          return { ok: true, after: geo, attempts: attempt + 1, endVal };
+        }
+      }
+      if (geo.endFrame > targetEnd) {
+        adjustRightSide(targetEnd - geo.endFrame);
+        await sleep(120);
+      } else {
+        const shortBy = Math.max(1, Math.min(4, targetEnd - geo.endFrame));
+        adjustRightSide(shortBy);
+        await sleep(120);
+      }
+      const bounds = findRangeBoundInputs();
+      if (bounds) {
+        // Keep start; only rewrite end so we don't disturb G1 abutment.
+        await setInputFrame(bounds.end, targetEnd);
+        await sleep(140);
+      }
+      // Fill to playhead at target end as a last push for episode-end shorts
+      if (attempt >= 1) {
+        const jumped = await goToFrame(targetEnd);
+        await sleep(60);
+        try {
+          active.el.click();
+        } catch {
+          /* ignore */
+        }
+        await sleep(100);
+        if (jumped.ok) {
+          clickFillToPlayhead();
+          await sleep(220);
+        } else if (total && targetEnd >= total - 1) {
+          // Jump to last navigable frame then nudge end past it via inputs/adjust
+          await goToFrame(Math.max(0, total - 1));
+          await sleep(60);
+          try {
+            active.el.click();
+          } catch {
+            /* ignore */
+          }
+          await sleep(80);
+          clickFillToPlayhead();
+          await sleep(200);
+          adjustRightSide(1);
+          await sleep(100);
+        }
+        const bounds2 = findRangeBoundInputs();
+        if (bounds2) {
+          const startKeep = Number(String(bounds2.start.value || "").replace(/[^\d]/g, ""));
+          if (Number.isFinite(startKeep)) await setInputFrame(bounds2.start, startKeep);
+          await setInputFrame(bounds2.end, targetEnd);
+          await sleep(140);
+        }
+      }
+      active =
+        findGradeNearStart(matchStart ?? active.startFrame, total) ||
+        (active.el ? withGradeFrames(describeRange(active.el) || active, total) : null) ||
+        active;
+    }
+
+    const finalGeo = timelineBounds(
+      findGradeNearStart(matchStart ?? preferRange?.startFrame, total) || preferRange
+    );
+    const boundsFinal = findRangeBoundInputs();
+    const endVal = boundsFinal
+      ? Number(String(boundsFinal.end.value || "").replace(/[^\d]/g, ""))
+      : null;
+    const okGeo = finalGeo && Math.abs(finalGeo.endFrame - targetEnd) <= BOUND_EPS;
+    const okInput = endVal != null && Number.isFinite(endVal) && Math.abs(endVal - targetEnd) <= BOUND_EPS;
+    return {
+      ok: !!(okGeo || okInput),
+      after: finalGeo,
+      wantEnd: targetEnd,
+      endVal,
+      error: okGeo || okInput ? undefined : "extend-end-failed",
+    };
   }
 
   function pctToFrame(pct, totalFrames) {
@@ -556,12 +671,13 @@
     return Math.max(0, Math.min(totalFrames, Math.round((Number(pct) / 100) * totalFrames)));
   }
 
-  /** Inclusive range end (clamped to last episode frame). */
+  /** Inclusive range end (clamped to episode last frame = totalFrames). */
   function pctToEndFrame(pct, totalFrames) {
     if (!totalFrames) return 0;
     const raw = (Number(pct) / 100) * totalFrames;
-    // Near-integer float noise (425.9999) → round to that frame.
-    return Math.max(0, Math.min(totalFrames - 1, Math.round(raw)));
+    // Near-integer float noise (435.9999) → round to that frame.
+    // Allow totalFrames itself — a bar at 100% is the episode last frame.
+    return Math.max(0, Math.min(totalFrames, Math.round(raw)));
   }
 
   function setNativeInputValue(input, value) {
@@ -1259,7 +1375,8 @@
     let wantStart = Math.max(0, Math.floor(startFrame));
     let wantEnd = Math.max(wantStart, Math.floor(endFrame));
     if (totalLive) {
-      wantEnd = Math.min(wantEnd, Math.max(0, totalLive - 1));
+      // Last frame index == totalFrames (not total-1); G2 must be able to reach it.
+      wantEnd = Math.min(wantEnd, totalLive);
       wantStart = Math.min(wantStart, wantEnd);
     }
     const matchStart = opts.matchStart != null ? opts.matchStart : wantStart;
@@ -1939,20 +2056,81 @@
                 snap: snapshot(),
               };
             }
-            // If restoring G1 nudged G2, fix G2 once more (still locked off primary).
-            const tailAfter = findGradeNearStart(tailStart, total);
-            if (
-              wroteTail.ok &&
-              tailAfter &&
-              tailAfter.startFrame > 1 &&
-              (Math.abs(tailAfter.startFrame - tailStart) > BOUND_EPS ||
-                Math.abs(tailAfter.endFrame - episodeEnd) > BOUND_EPS)
-            ) {
+          }
+
+          // G1 restore / blur often leaves G2 short of episode end — always re-check.
+          // Episode last frame == totalFrames; verify CSS and Range end input.
+          await sleep(100);
+          let tailAfter = findGradeNearStart(tailStart, total);
+          if (tailAfter && tailAfter.startFrame > 1) {
+            const startOk = Math.abs(tailAfter.startFrame - tailStart) <= BOUND_EPS;
+            let endOk = Math.abs((tailAfter.endFrame ?? -1) - episodeEnd) <= BOUND_EPS;
+            if (!endOk) {
+              try {
+                tailAfter.el.click();
+                await sleep(150);
+                const b = findRangeBoundInputs();
+                const endVal = b
+                  ? Number(String(b.end.value || "").replace(/[^\d]/g, ""))
+                  : null;
+                if (endVal != null && Math.abs(endVal - episodeEnd) <= BOUND_EPS) {
+                  endOk = true;
+                }
+              } catch {
+                /* ignore */
+              }
+            }
+            if (!startOk) {
               wroteTail = await resizeViaRangeInputs(tailStart, episodeEnd, {
                 matchStart: tailStart,
                 selectRange: tailAfter,
                 lockToSelectRange: true,
               });
+              tailAfter = findGradeNearStart(tailStart, total) || tailAfter;
+            } else if (!endOk) {
+              const extended = await extendGradeEndOnly(tailAfter, episodeEnd, {
+                matchStart: tailStart,
+              });
+              wroteTail = extended.ok
+                ? { ok: true, via: "extend-end-only", extended }
+                : { ok: false, error: extended.error || "tail-end-short", extended };
+              tailAfter = findGradeNearStart(tailStart, total) || tailAfter;
+            }
+            // Final end check even after full resize
+            if (wroteTail.ok !== false && tailAfter) {
+              let stillShort =
+                Math.abs((tailAfter.endFrame ?? -1) - episodeEnd) > BOUND_EPS;
+              if (stillShort) {
+                try {
+                  tailAfter.el.click();
+                  await sleep(120);
+                  const b = findRangeBoundInputs();
+                  const endVal = b
+                    ? Number(String(b.end.value || "").replace(/[^\d]/g, ""))
+                    : null;
+                  if (endVal != null && Math.abs(endVal - episodeEnd) <= BOUND_EPS) {
+                    stillShort = false;
+                  }
+                } catch {
+                  /* ignore */
+                }
+              }
+              if (stillShort) {
+                const extended = await extendGradeEndOnly(tailAfter, episodeEnd, {
+                  matchStart: tailStart,
+                });
+                if (!extended.ok) {
+                  wroteTail = {
+                    ok: false,
+                    error: "tail-end-short",
+                    extended,
+                    endFrame: tailAfter.endFrame,
+                    wantEnd: episodeEnd,
+                  };
+                } else {
+                  wroteTail = { ok: true, via: "extend-end-only-final", extended };
+                }
+              }
             }
           }
           primaryEnd = findPrimaryGradeRange()?.endFrame ?? endFrame;
