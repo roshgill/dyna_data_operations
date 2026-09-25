@@ -2,7 +2,7 @@
 // Write path: Encord classification UI (frame jump + C/V/M or Range start/end inputs).
 // No timeline draw-drag / alt-click / shift-click (those create single-frame pins).
 (() => {
-  const VERSION = "0.18.24-grade";
+  const VERSION = "0.18.25-grade";
   const STORAGE_ENABLED = "autoGradeEnabled";
   // v2 key — invalidates bad caches that stored lastStepNum=2 from truncated scrapes
   const STORAGE_DEFINED_STEPS = "gradeSyncDefinedStepsV2";
@@ -13,6 +13,15 @@
   const BOUND_EPS = 0; // Grade vs Step end — 1 frame is a real change, not noise
   const WORKFLOW_DEBOUNCE_MS = 550;
   const LAST_STEP_RESIZE_DEBOUNCE_MS = 450;
+  /** UI settle waits — keep low; success paths early-exit. */
+  const W = {
+    tick: 20,
+    short: 40,
+    med: 70,
+    panel: 100,
+    settle: 120,
+    create: 200,
+  };
 
   if (window.__encordGradeSync?.version === VERSION) return;
 
@@ -626,17 +635,17 @@
     } catch {
       return { ok: false, error: "click-failed" };
     }
-    await sleep(240);
+    await sleep(W.panel);
 
     let lastStepId = { ok: false };
     let lastOutcome = { ok: false };
-    for (let i = 0; i < 5; i += 1) {
+    for (let i = 0; i < 3; i += 1) {
       try {
         range.el.click();
       } catch {
         /* ignore */
       }
-      await sleep(180);
+      await sleep(W.med);
       const instance = normalizeLabel(
         document.querySelector('[data-testid="instance-name"]')?.textContent || ""
       ).toLowerCase();
@@ -646,20 +655,20 @@
         } catch {
           /* ignore */
         }
-        await sleep(200);
+        await sleep(W.panel);
       }
 
       lastStepId = selectFirstStepIdentityOption();
-      await sleep(180);
+      await sleep(W.med);
       lastOutcome = selectIncompleteStepOption();
-      await sleep(200);
+      await sleep(W.panel);
       const checked = findStepOutcomeIncompleteChecked();
       if (checked.ok && lastStepId.ok) {
         await blurRangeFrameInputs();
-        await sleep(60);
+        await sleep(W.short);
         const done = clickDoneIfPresent();
         if (!done) pressEditorKey("Escape");
-        await sleep(120);
+        await sleep(W.med);
         return {
           ok: true,
           via: lastOutcome.via || "step-outcome-radio",
@@ -670,7 +679,7 @@
           done: !!done,
         };
       }
-      await sleep(120);
+      await sleep(W.short);
     }
     return {
       ok: false,
@@ -692,7 +701,7 @@
     } catch {
       return { ok: false, error: "g1-click-failed" };
     }
-    await sleep(180);
+    await sleep(W.med);
     return { ok: true, grade, via: "g1-click" };
   }
 
@@ -976,13 +985,13 @@
       return { ok: false, error: "extend-resolved-to-primary" };
     }
 
-    for (let attempt = 0; attempt < 5; attempt += 1) {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
       try {
         active.el.click();
       } catch {
         return { ok: false, error: "click-failed" };
       }
-      await sleep(160);
+      await sleep(W.panel);
       const geo = timelineBounds(active);
       if (!geo) return { ok: false, error: "no-geo" };
       if (Math.abs(geo.endFrame - targetEnd) <= BOUND_EPS) {
@@ -997,52 +1006,52 @@
       }
       if (geo.endFrame > targetEnd) {
         adjustRightSide(targetEnd - geo.endFrame);
-        await sleep(120);
+        await sleep(W.med);
       } else {
         const shortBy = Math.max(1, Math.min(4, targetEnd - geo.endFrame));
         adjustRightSide(shortBy);
-        await sleep(120);
+        await sleep(W.med);
       }
       const bounds = findRangeBoundInputs();
       if (bounds) {
         // Keep start; only rewrite end so we don't disturb G1 abutment.
         await setInputFrame(bounds.end, targetEnd);
-        await sleep(140);
+        await sleep(W.panel);
       }
       // Fill to playhead at target end as a last push for episode-end shorts
       if (attempt >= 1) {
         const jumped = await goToFrame(targetEnd);
-        await sleep(60);
+        await sleep(W.short);
         try {
           active.el.click();
         } catch {
           /* ignore */
         }
-        await sleep(100);
+        await sleep(W.med);
         if (jumped.ok) {
           clickFillToPlayhead();
-          await sleep(220);
+          await sleep(W.settle);
         } else if (total && targetEnd >= total - 1) {
           // Jump to last navigable frame then nudge end past it via inputs/adjust
           await goToFrame(Math.max(0, total - 1));
-          await sleep(60);
+          await sleep(W.short);
           try {
             active.el.click();
           } catch {
             /* ignore */
           }
-          await sleep(80);
+          await sleep(W.short);
           clickFillToPlayhead();
-          await sleep(200);
+          await sleep(W.settle);
           adjustRightSide(1);
-          await sleep(100);
+          await sleep(W.med);
         }
         const bounds2 = findRangeBoundInputs();
         if (bounds2) {
           const startKeep = Number(String(bounds2.start.value || "").replace(/[^\d]/g, ""));
           if (Number.isFinite(startKeep)) await setInputFrame(bounds2.start, startKeep);
           await setInputFrame(bounds2.end, targetEnd);
-          await sleep(140);
+          await sleep(W.panel);
         }
       }
       active =
@@ -1130,17 +1139,21 @@
           { source: "encord-grade-sync", type: "GOTO_FRAME", id, frame },
           "*"
         );
-      }, 50);
+      }, 20);
     });
   }
 
   async function goToFrame(frame) {
     const target = Math.max(0, Math.floor(frame));
+    const already = getCurrentFrame();
+    if (already != null && Math.abs(already - target) <= FRAME_EPS) {
+      return { ok: true, frame: already, via: "already" };
+    }
 
     // 1) MAIN-world React path
     let result = await pageGotoFrame(target);
-    for (let i = 0; i < 15; i += 1) {
-      await sleep(40);
+    for (let i = 0; i < 10; i += 1) {
+      await sleep(W.tick);
       const cur = getCurrentFrame();
       if (cur != null && Math.abs(cur - target) <= FRAME_EPS) {
         return { ok: true, frame: cur, via: "page-world" };
@@ -1151,15 +1164,15 @@
     const input = document.querySelector('[data-testid="content-navigation-frame-input"]');
     if (input) {
       input.focus();
-      await sleep(20);
+      await sleep(W.tick);
       input.select?.();
       setNativeInputValue(input, String(target));
       input.dispatchEvent(
         new KeyboardEvent("keydown", { key: "Enter", code: "Enter", keyCode: 13, bubbles: true })
       );
       input.blur();
-      for (let i = 0; i < 15; i += 1) {
-        await sleep(40);
+      for (let i = 0; i < 10; i += 1) {
+        await sleep(W.tick);
         const cur = getCurrentFrame();
         if (cur != null && Math.abs(cur - target) <= FRAME_EPS) {
           return { ok: true, frame: cur, via: "dom-input" };
@@ -1178,8 +1191,8 @@
       el.dispatchEvent(
         new MouseEvent("click", { bubbles: true, cancelable: true, clientX: x, clientY: y, view: window })
       );
-      for (let i = 0; i < 15; i += 1) {
-        await sleep(40);
+      for (let i = 0; i < 10; i += 1) {
+        await sleep(W.tick);
         const cur = getCurrentFrame();
         if (cur != null && Math.abs(cur - target) <= Math.max(FRAME_EPS, 2)) {
           return { ok: true, frame: cur, via: "slider" };
@@ -1429,7 +1442,7 @@
       shell.querySelector?.('[data-testid="canvas"]') ||
       shell;
     clickEl(target);
-    await sleep(40);
+    await sleep(W.short);
     clickEl(target);
     return shell;
   }
@@ -1441,13 +1454,13 @@
    */
   async function clearInstanceSelection() {
     const shell = await focusPreferredGradeTile();
-    await sleep(40);
+    await sleep(W.short);
 
     const modeTag =
       shell?.querySelector?.('[data-testid="editor-mode-status-tag"]') ||
       document.querySelector('[data-testid="editor-mode-status-tag"]');
     clickEl(modeTag);
-    await sleep(40);
+    await sleep(W.short);
 
     const canvas =
       shell?.querySelector?.('[data-testid="canvas"]') ||
@@ -1471,9 +1484,9 @@
         new MouseEvent("click", { bubbles: true, clientX: x, clientY: y, view: window })
       );
     }
-    await sleep(60);
+    await sleep(W.short);
     pressEditorKey("Escape");
-    await sleep(40);
+    await sleep(W.short);
   }
 
   function activateTrajectoryClass() {
@@ -1633,9 +1646,9 @@
     } catch {
       return { ok: false, error: "click-failed" };
     }
-    await sleep(220);
+    await sleep(W.panel);
     await blurRangeFrameInputs();
-    await sleep(80);
+    await sleep(W.short);
 
     // Prefer visible Incomplete radio; fall back to hotkey I (Grade panel only)
     let via = "hotkey-i";
@@ -1645,12 +1658,12 @@
     } else {
       pressEditorKey("i");
     }
-    await sleep(200);
+    await sleep(W.panel);
 
     const checked = findGradeValueChecked("incomplete");
     const done = clickDoneIfPresent();
     if (!done) pressEditorKey("Escape");
-    await sleep(120);
+    await sleep(W.med);
 
     return {
       ok: checked.ok || radio.ok || via === "hotkey-i",
@@ -1702,7 +1715,7 @@
     // Prefer MAIN-world React onChange so Encord state commits (DOM-only value can lie).
     if (aria) {
       const page = await pageSetRangeInput(aria, Number(val));
-      await sleep(100);
+      await sleep(W.short);
       const live = document.querySelector(`input[aria-label="${aria}"]`) || input;
       if (String(live.value || "").replace(/[^\d]/g, "") === val) {
         // Commit: Enter + blur (Ant often applies onPressEnter / onBlur)
@@ -1730,13 +1743,13 @@
         } catch {
           /* ignore */
         }
-        await sleep(80);
+        await sleep(W.short);
         return { ok: true, via: "react", page };
       }
     }
 
     input.focus();
-    await sleep(30);
+    await sleep(W.tick);
     try {
       input.select();
     } catch {
@@ -1796,7 +1809,7 @@
           { source: "encord-grade-sync", type: "SET_RANGE_INPUT", id, ariaLabel, frame },
           "*"
         );
-      }, 40);
+      }, 20);
     });
   }
 
@@ -1994,7 +2007,7 @@
       } catch {
         return false;
       }
-      await sleep(200);
+      await sleep(W.med);
       return true;
     }
 
@@ -2005,35 +2018,51 @@
         bounds = findRangeBoundInputs();
       }
       if (!bounds) return { ok: false, error: "no-range-inputs" };
-      await setInputFrame(bounds.start, start);
-      await sleep(80);
-      bounds = findRangeBoundInputs() || bounds;
-      await setInputFrame(bounds.end, end);
-      await sleep(80);
-      bounds = findRangeBoundInputs() || bounds;
-      await setInputFrame(bounds.start, start);
-      await sleep(80);
-      bounds = findRangeBoundInputs() || bounds;
-      await setInputFrame(bounds.end, end);
-      await sleep(120);
-      const startEl = document.querySelector('input[aria-label="Range start"]');
-      const endEl = document.querySelector('input[aria-label="Range end"]');
-      return {
-        ok: true,
-        startVal: Number(String(startEl?.value || "").replace(/[^\d]/g, "")),
-        endVal: Number(String(endEl?.value || "").replace(/[^\d]/g, "")),
+
+      const readVals = () => {
+        const startEl = document.querySelector('input[aria-label="Range start"]');
+        const endEl = document.querySelector('input[aria-label="Range end"]');
+        return {
+          startVal: Number(String(startEl?.value || "").replace(/[^\d]/g, "")),
+          endVal: Number(String(endEl?.value || "").replace(/[^\d]/g, "")),
+        };
       };
+
+      // Skip writes when inputs already match
+      let cur = readVals();
+      if (cur.startVal === start && cur.endVal === end) {
+        return { ok: true, ...cur, skipped: true };
+      }
+
+      await setInputFrame(bounds.start, start);
+      await sleep(W.short);
+      bounds = findRangeBoundInputs() || bounds;
+      await setInputFrame(bounds.end, end);
+      await sleep(W.short);
+      cur = readVals();
+      if (cur.startVal === start && cur.endVal === end) {
+        return { ok: true, ...cur };
+      }
+
+      // Second pass only if first didn't stick
+      bounds = findRangeBoundInputs() || bounds;
+      await setInputFrame(bounds.start, start);
+      await sleep(W.short);
+      bounds = findRangeBoundInputs() || bounds;
+      await setInputFrame(bounds.end, end);
+      await sleep(W.med);
+      return { ok: true, ...readVals() };
     }
 
     async function fillAt(frame) {
       const jumped = await goToFrame(frame);
-      await sleep(70);
+      await sleep(W.short);
       const selected = await selectGrade();
       if (!selected) {
         return { jumped: jumped.ok, via: null, geo: null, error: "fill-no-select" };
       }
       const via = jumped.ok ? clickFillToPlayhead() : null;
-      await sleep(240);
+      await sleep(W.settle);
       active = refreshActive() || active;
       return { jumped: jumped.ok, via, geo: timelineBounds(active) };
     }
@@ -2042,10 +2071,27 @@
       return { ok: false, error: lockTail ? "no-tail-grade" : "no-grade" };
     }
 
-    for (let attempt = 0; attempt < 5; attempt += 1) {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
       await selectGrade();
       active = refreshActive() || active;
       let geo = timelineBounds(active);
+
+      // Already correct — skip fill/write churn
+      if (timelineMatches(wantStart, wantEnd, active)) {
+        await blurRangeFrameInputs();
+        await sleep(W.short);
+        active = refreshActive() || active;
+        if (timelineMatches(wantStart, wantEnd, active)) {
+          return {
+            ok: true,
+            via: "already-matched",
+            after: timelineBounds(active),
+            want: { startFrame: wantStart, endFrame: wantEnd },
+            attempts: attempt + 1,
+            framesBlurred: true,
+          };
+        }
+      }
 
       // 1) Expand pin → real range via Fill (inputs alone do not grow a pin)
       if (!geo || geo.span <= 2 || Math.abs(geo.startFrame - wantStart) > BOUND_EPS) {
@@ -2067,7 +2113,7 @@
 
       // 2) Exact values via Range inputs (works once a real span exists)
       const written = await writeInputs(wantStart, wantEnd);
-      await sleep(150);
+      await sleep(W.panel);
       active = refreshActive() || active;
       geo = timelineBounds(active);
 
@@ -2078,17 +2124,17 @@
         const endDelta = wantEnd - geo.endFrame;
         if (Math.abs(startDelta) > 0 && Math.abs(startDelta) <= 40) {
           adjustLeftSide(startDelta);
-          await sleep(120);
+          await sleep(W.med);
         }
         if (Math.abs(endDelta) > 0 && Math.abs(endDelta) <= 40) {
           adjustRightSide(endDelta);
-          await sleep(120);
+          await sleep(W.med);
         }
         active = refreshActive() || active;
         geo = timelineBounds(active);
         if (!timelineMatches(wantStart, wantEnd, active)) {
           await writeInputs(wantStart, wantEnd);
-          await sleep(120);
+          await sleep(W.med);
         }
       }
 
@@ -2098,9 +2144,9 @@
       if (geo && geo.endFrame > wantEnd && geo.endFrame - wantEnd <= 60) {
         await selectGrade();
         adjustRightSide(wantEnd - geo.endFrame);
-        await sleep(150);
+        await sleep(W.panel);
         await writeInputs(wantStart, wantEnd);
-        await sleep(100);
+        await sleep(W.med);
       }
 
       // 5) Encord often settles one frame short of Range end — extend if short by 1–2
@@ -2111,9 +2157,9 @@
         await selectGrade();
         for (let n = 0; n < shortBy + 1; n += 1) {
           adjustRightSide(1);
-          await sleep(100);
+          await sleep(W.med);
           await writeInputs(wantStart, wantEnd);
-          await sleep(120);
+          await sleep(W.med);
           active = refreshActive() || active;
           geo = timelineBounds(active);
           if (geo && Math.abs(geo.endFrame - wantEnd) <= BOUND_EPS) break;
@@ -2123,18 +2169,18 @@
       active = refreshActive() || active;
       if (timelineMatches(wantStart, wantEnd, active)) {
         await blurRangeFrameInputs();
-        await sleep(160);
+        await sleep(W.med);
         // Re-read after blur — Encord can snap end back by 1 frame on commit
         active = refreshActive() || active;
         geo = timelineBounds(active);
         if (geo && geo.endFrame < wantEnd && wantEnd - geo.endFrame <= 2) {
           await selectGrade();
           adjustRightSide(wantEnd - geo.endFrame);
-          await sleep(120);
+          await sleep(W.med);
           await writeInputs(wantStart, wantEnd);
-          await sleep(120);
+          await sleep(W.med);
           await blurRangeFrameInputs();
-          await sleep(120);
+          await sleep(W.med);
           active = refreshActive() || active;
         }
         if (timelineMatches(wantStart, wantEnd, active)) {
@@ -2185,17 +2231,17 @@
       } catch {
         /* ignore */
       }
-      await sleep(220);
+      await sleep(W.panel);
       if (findRangeBoundInputs()) return { ok: true, via: "clicked-pin" };
     }
 
     await clearInstanceSelection();
     // Re-assert preferred tile after deselect — ontology clicks must not land on a wrist cam.
     await focusPreferredGradeTile();
-    await sleep(40);
+    await sleep(W.short);
     const activated = activateTrajectoryClass();
     if (!activated) return { ok: false, error: "no-trajectory-class" };
-    await sleep(180);
+    await sleep(W.panel);
 
     const gradeHit = [...document.querySelectorAll("label, [role='radio'], button, [role='button']")].find(
       (el) => {
@@ -2207,13 +2253,13 @@
     );
     if (gradeHit) gradeHit.click();
     else pressEditorKey("q");
-    await sleep(100);
+    await sleep(W.med);
 
     // Prefer a pin at frame 0 when creating, but Range inputs always overwrite to 0…end.
     // If jump fails, still create a throwaway pin — do NOT use set-start/end-to-current as final.
     const atZero = await goToFrame(0);
     document.activeElement?.blur?.();
-    await sleep(40);
+    await sleep(W.short);
 
     if (atZero.ok) {
       clickControlByText([/this frame\s*&\s*save/i, /^this frame$/i, /this frame/i]);
@@ -2237,7 +2283,7 @@
         );
       }
     }
-    await sleep(400);
+    await sleep(W.create);
 
     const pin = findPrimaryGradeRange();
     if (pin) {
@@ -2246,7 +2292,7 @@
       } catch {
         /* ignore */
       }
-      await sleep(220);
+      await sleep(W.panel);
     }
 
     if (findRangeBoundInputs() || findPrimaryGradeRange()) {
@@ -2266,10 +2312,10 @@
 
     await clearInstanceSelection();
     await focusPreferredGradeTile();
-    await sleep(40);
+    await sleep(W.short);
     const activated = activateTrajectoryClass();
     if (!activated) return { ok: false, error: "no-trajectory-class" };
-    await sleep(180);
+    await sleep(W.panel);
 
     const gradeHit = [...document.querySelectorAll("label, [role='radio'], button, [role='button']")].find(
       (el) => {
@@ -2281,11 +2327,11 @@
     );
     if (gradeHit) gradeHit.click();
     else pressEditorKey("q");
-    await sleep(100);
+    await sleep(W.med);
 
     const jumped = await goToFrame(at);
     document.activeElement?.blur?.();
-    await sleep(40);
+    await sleep(W.short);
 
     if (jumped.ok) {
       clickControlByText([/this frame\s*&\s*save/i, /^this frame$/i, /this frame/i]);
@@ -2308,7 +2354,7 @@
         );
       }
     }
-    await sleep(450);
+    await sleep(W.create);
 
     let pin =
       findGradeNearStart(at, total) ||
@@ -2320,7 +2366,7 @@
       } catch {
         /* ignore */
       }
-      await sleep(220);
+      await sleep(W.panel);
       pin = findGradeNearStart(at, total) || pin;
     }
 
@@ -2350,16 +2396,16 @@
 
     await clearInstanceSelection();
     await focusPreferredGradeTile();
-    await sleep(40);
+    await sleep(W.short);
     const activated = activateStepClass();
     if (!activated) return { ok: false, error: "no-step-class" };
-    await sleep(180);
+    await sleep(W.panel);
 
     // Do not set Step Outcome before the pin exists — Outcome radios need an instance.
 
     const jumped = await goToFrame(at);
     document.activeElement?.blur?.();
-    await sleep(40);
+    await sleep(W.short);
 
     if (jumped.ok) {
       clickControlByText([/this frame\s*&\s*save/i, /^this frame$/i, /this frame/i]);
@@ -2382,7 +2428,7 @@
         );
       }
     }
-    await sleep(450);
+    await sleep(W.create);
 
     let pin =
       findStepTailByGeometry(at, total) ||
@@ -2394,7 +2440,7 @@
       } catch {
         /* ignore */
       }
-      await sleep(220);
+      await sleep(W.panel);
       pin = findStepTailByGeometry(at, total) || pin;
     }
 
@@ -2420,18 +2466,18 @@
     } catch {
       /* ignore */
     }
-    await sleep(180);
+    await sleep(W.panel);
     await goToFrame(end);
-    await sleep(80);
+    await sleep(W.short);
     clickFillToPlayhead();
-    await sleep(280);
+    await sleep(W.settle);
 
     let wrote = await resizeViaRangeInputs(start, end, {
       matchStart: start,
       selectRange: pin,
       lockToSelectRange: true,
     });
-    await sleep(100);
+    await sleep(W.med);
 
     let step = findStepTailByGeometry(start, total) || pin;
     const spanOk =
@@ -2452,25 +2498,25 @@
       } catch {
         /* ignore */
       }
-      await sleep(150);
+      await sleep(W.panel);
     }
     await goToFrame(end);
-    await sleep(60);
+    await sleep(W.short);
     clickFillToPlayhead();
-    await sleep(220);
+    await sleep(W.settle);
     const bounds = findRangeBoundInputs();
     if (bounds) {
       await setInputFrame(bounds.start, start);
-      await sleep(80);
+      await sleep(W.short);
       await setInputFrame(bounds.end, end);
-      await sleep(140);
+      await sleep(W.panel);
     }
     wrote = await resizeViaRangeInputs(start, end, {
       matchStart: start,
       selectRange: step || pin,
       lockToSelectRange: true,
     });
-    await sleep(100);
+    await sleep(W.med);
     step = findStepTailByGeometry(start, total) || step;
     const ok =
       step &&
@@ -2516,7 +2562,7 @@
       } catch {
         /* ignore */
       }
-      await sleep(160);
+      await sleep(W.panel);
       if (findStepOutcomeIncompleteChecked().ok) {
         return { ok: true, skipped: true, reason: "step-tail-already-synced", step, label: "incomplete" };
       }
@@ -2536,10 +2582,10 @@
 
     // Expand pin → episode end (geometry-backed; do not trust Range inputs alone)
     let wrote = { ok: false };
-    for (let attempt = 0; attempt < 3; attempt += 1) {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
       step = findTailStep() || step;
       wrote = await expandStepPinToRange(step, tailStart, episodeEnd);
-      await sleep(120);
+      await sleep(W.med);
       step = findTailStep() || wrote.step || step;
       if (isReady(step)) break;
     }
@@ -2557,10 +2603,10 @@
 
     // Step Outcome → Incomplete (verify radio, not timeline label)
     let stepValue = { ok: false };
-    for (let i = 0; i < 3; i += 1) {
+    for (let i = 0; i < 2; i += 1) {
       step = findTailStep() || step;
       stepValue = await applyIncompleteStepToRange(step);
-      await sleep(120);
+      await sleep(W.med);
       if (stepValue.ok || findStepOutcomeIncompleteChecked().ok) {
         stepValue = { ...stepValue, ok: true };
         break;
@@ -2568,7 +2614,7 @@
     }
 
     await blurRangeFrameInputs();
-    await sleep(60);
+    await sleep(W.short);
 
     step = findTailStep() || step;
     const outcomeOk = stepValue.ok || findStepOutcomeIncompleteChecked().ok;
@@ -2890,7 +2936,7 @@
           }
 
           // Re-assert G1 after G2 — Encord / mistaken Fill can still trim primary by 1.
-          await sleep(120);
+          await sleep(W.med);
           primaryGeo = findPrimaryGradeRange();
           if (
             !primaryGeo ||
@@ -2918,7 +2964,7 @@
 
           // G1 restore / blur often leaves G2 short of episode end — always re-check.
           // Episode last frame == totalFrames; verify CSS and Range end input.
-          await sleep(100);
+          await sleep(W.med);
           let tailAfter = findGradeNearStart(tailStart, total);
           if (tailAfter && tailAfter.startFrame > 1) {
             const startOk = Math.abs(tailAfter.startFrame - tailStart) <= BOUND_EPS;
@@ -2926,7 +2972,7 @@
             if (!endOk) {
               try {
                 tailAfter.el.click();
-                await sleep(150);
+                await sleep(W.panel);
                 const b = findRangeBoundInputs();
                 const endVal = b
                   ? Number(String(b.end.value || "").replace(/[^\d]/g, ""))
@@ -2961,7 +3007,7 @@
               if (stillShort) {
                 try {
                   tailAfter.el.click();
-                  await sleep(120);
+                  await sleep(W.med);
                   const b = findRangeBoundInputs();
                   const endVal = b
                     ? Number(String(b.end.value || "").replace(/[^\d]/g, ""))
@@ -2998,7 +3044,7 @@
           if (wroteTail.ok !== false && tailForValue?.el) {
             gradeValue = await applyIncompleteGradeToRange(tailForValue);
             wroteTail = { ...wroteTail, gradeValue };
-            await sleep(60);
+            await sleep(W.short);
           }
           primaryEnd = findPrimaryGradeRange()?.endFrame ?? endFrame;
 
@@ -3019,7 +3065,7 @@
         const after = snapshot();
         lastAppliedKey = snap.key;
         await blurRangeFrameInputs();
-        await sleep(40);
+        await sleep(W.short);
         if (!quiet) {
           const tailBit =
             wroteTail.skipped && wroteTail.reason === "no-tail-frames"
