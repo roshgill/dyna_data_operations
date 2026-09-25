@@ -2,7 +2,7 @@
 // Write path: Encord classification UI (frame jump + C/V/M or Range start/end inputs).
 // No timeline draw-drag / alt-click / shift-click (those create single-frame pins).
 (() => {
-  const VERSION = "0.18.7-grade";
+  const VERSION = "0.18.11-grade";
   const STORAGE_ENABLED = "autoGradeEnabled";
   // v2 key — invalidates bad caches that stored lastStepNum=2 from truncated scrapes
   const STORAGE_DEFINED_STEPS = "gradeSyncDefinedStepsV2";
@@ -180,24 +180,73 @@
   }
 
   function listTimelineSteps() {
-    return listRanges("row-step", { includePins: false })
-      .map((r) => ({ ...r, stepNum: parseStepNumber(r.label) }))
-      .filter((r) => r.stepNum != null && r.width >= 0.35);
+    return listRanges("row-step", { includePins: true })
+      .map((r) => {
+        const stepNum = parseStepNumber(r.label);
+        const incomplete = isIncompleteStepLabel(r.label);
+        return { ...r, stepNum, incomplete };
+      })
+      .filter((r) => (r.stepNum != null || r.incomplete) && (r.width >= 0.05 || r.pin));
+  }
+
+  /** Every Step timeline range including unlabeled pins (S2 create leaves empty labels). */
+  function listAllStepRanges(totalFrames = getTotalFrames()) {
+    return listRanges("row-step", { includePins: true })
+      .map((r) => {
+        const framed = withGradeFrames(r, totalFrames);
+        if (!framed) return null;
+        return {
+          ...framed,
+          stepNum: parseStepNumber(r.label),
+          incomplete: isIncompleteStepLabel(r.label),
+        };
+      })
+      .filter(Boolean);
+  }
+
+  /**
+   * S2 finder: geometry first (empty-label pins are invisible to label filters).
+   * Prefer pin / tiny range whose start is nearest to wantStart.
+   */
+  function findStepTailByGeometry(wantStart, totalFrames = getTotalFrames()) {
+    if (wantStart == null || !totalFrames) return null;
+    const all = listAllStepRanges(totalFrames);
+    if (!all.length) return null;
+    const tol = Math.max(BOUND_EPS, 3);
+    const near = all.filter((r) => Math.abs(r.startFrame - wantStart) <= tol);
+    const pool = near.length ? near : all.filter((r) => r.startFrame >= wantStart - tol);
+    if (!pool.length) return null;
+    // Prefer incomplete label, then pins / tiny spans, then closest start
+    pool.sort((a, b) => {
+      const aInc = a.incomplete || isIncompleteStepLabel(a.label) ? 0 : 1;
+      const bInc = b.incomplete || isIncompleteStepLabel(b.label) ? 0 : 1;
+      if (aInc !== bInc) return aInc - bInc;
+      const aPin = a.pin || a.span <= 2 ? 0 : 1;
+      const bPin = b.pin || b.span <= 2 ? 0 : 1;
+      if (aPin !== bPin) return aPin - bPin;
+      return (
+        Math.abs(a.startFrame - wantStart) - Math.abs(b.startFrame - wantStart) ||
+        b.left - a.left
+      );
+    });
+    return pool[0];
   }
 
   function findStepRangeByNum(stepNum) {
     const want = Number(stepNum);
     if (!Number.isFinite(want)) return null;
-    const matches = listTimelineSteps().filter((s) => s.stepNum === want);
+    const matches = listTimelineSteps().filter((s) => s.stepNum === want && !s.incomplete);
     if (!matches.length) return null;
     // Prefer the widest / rightmost instance of that step id
     matches.sort((a, b) => b.width - a.width || b.end - a.end);
     return matches[0];
   }
 
-  /** Rightmost/highest step currently drawn — NOT the ontology last step. */
+  /** Rightmost/highest numbered step currently drawn — NOT incomplete / ontology last. */
   function findLastTimelineStepRange() {
-    const steps = listTimelineSteps();
+    const steps = listTimelineSteps().filter(
+      (s) => s.stepNum != null && !s.incomplete && (s.width >= 0.35 || !s.pin)
+    );
     if (!steps.length) return null;
     const maxN = Math.max(...steps.map((s) => s.stepNum));
     return findStepRangeByNum(maxN);
@@ -222,9 +271,14 @@
     return Number.isFinite(stepNum) ? { stepNum, label: t.slice(0, 160) } : null;
   }
 
+  function isIncompleteStepLabel(raw) {
+    return /^incomplete$/i.test(normalizeLabel(raw));
+  }
+
   /**
    * Ontology Step options are an ordered list (tree / radio rows).
-   * Last defined = last object in that list (DOM order), not Math.max of a partial scrape.
+   * Numbered steps only — used for “last defined Step” (G1 end). Does not include
+   * the trailing "incomplete" option used for S2.
    */
   function scrapeOrderedStepOptions(root) {
     if (!root) return [];
@@ -240,6 +294,7 @@
         stepNum: parsed.stepNum,
         label: parsed.label,
         order: ordered.length,
+        el,
       });
     };
 
@@ -258,6 +313,56 @@
     }
 
     // 2) Fallback: radio labels in document order
+    if (ordered.length < 2) {
+      for (const el of root.querySelectorAll("label.ant-radio-wrapper, .ant-tree label")) {
+        push(el.textContent || "", el);
+      }
+    }
+
+    return ordered;
+  }
+
+  /**
+   * Full Step selection array including trailing "incomplete" (last entry).
+   * Used for S2 value — not for last-defined-step numbering.
+   */
+  function scrapeOrderedStepSelectionOptions(root) {
+    if (!root) return [];
+    const ordered = [];
+    const seen = new Set();
+
+    const push = (raw, el) => {
+      if (!el || isInTimelineChrome(el) || isInLabelsPane(el)) return;
+      const t = normalizeLabel(raw);
+      if (!t || t.length > 200) return;
+      const parsed = parseStepNumFromText(t);
+      const incomplete = isIncompleteStepLabel(t);
+      if (!parsed && !incomplete) return;
+      const key = incomplete ? "incomplete" : `step-${parsed.stepNum}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      ordered.push({
+        stepNum: parsed?.stepNum ?? null,
+        incomplete,
+        label: (parsed?.label || t).slice(0, 160),
+        order: ordered.length,
+        el,
+      });
+    };
+
+    const treeItems = [...root.querySelectorAll('[role="treeitem"]')].filter((el) => {
+      const style = el.getAttribute("style") || "";
+      if (/display:\s*none/i.test(style)) return false;
+      return !!el.querySelector("label.ant-radio-wrapper, label, .ant-radio");
+    });
+    for (const item of treeItems) {
+      const title =
+        item.querySelector(".ant-tree-title") ||
+        item.querySelector("label.ant-radio-wrapper") ||
+        item.querySelector("label");
+      push(title?.textContent || item.textContent || "", item);
+    }
+
     if (ordered.length < 2) {
       for (const el of root.querySelectorAll("label.ant-radio-wrapper, .ant-tree label")) {
         push(el.textContent || "", el);
@@ -290,6 +395,106 @@
   function lastDefinedFromSteps(steps) {
     if (!Array.isArray(steps) || !steps.length) return null;
     return steps[steps.length - 1];
+  }
+
+  /** First defined Step = first entry in the ordered ontology options array (Step 1). */
+  function firstDefinedFromSteps(steps) {
+    if (!Array.isArray(steps) || !steps.length) return null;
+    return steps[0];
+  }
+
+  function listTimelineStepsWithFrames(totalFrames = getTotalFrames()) {
+    if (!totalFrames) return [];
+    return listTimelineSteps()
+      .map((s) => {
+        const framed = withGradeFrames(s, totalFrames);
+        return framed
+          ? { ...framed, stepNum: s.stepNum, incomplete: !!s.incomplete }
+          : null;
+      })
+      .filter(Boolean);
+  }
+
+  /** Step whose start is nearest to wantStart (optional stepNum / incomplete filter). */
+  function findStepNearStart(
+    wantStart,
+    { stepNum = null, incomplete = false, totalFrames = getTotalFrames() } = {}
+  ) {
+    if (wantStart == null || !totalFrames) return null;
+    let all = listTimelineStepsWithFrames(totalFrames);
+    if (incomplete) {
+      all = all.filter((s) => s.incomplete || isIncompleteStepLabel(s.label));
+    } else if (stepNum != null) {
+      all = all.filter((s) => s.stepNum === stepNum && !s.incomplete);
+    }
+    if (!all.length) return null;
+    const tol = Math.max(BOUND_EPS, 2);
+    const hits = all.filter((r) => Math.abs(r.startFrame - wantStart) <= tol);
+    if (hits.length) {
+      hits.sort(
+        (a, b) =>
+          Math.abs(a.startFrame - wantStart) - Math.abs(b.startFrame - wantStart) ||
+          b.width - a.width
+      );
+      return hits[0];
+    }
+    const inTail = all.filter((r) => r.startFrame >= wantStart - tol);
+    inTail.sort((a, b) => a.startFrame - b.startFrame);
+    return inTail[0] || null;
+  }
+
+  function stepSelectionRoots() {
+    return [
+      document.querySelector('[data-testid="object-left-panel"]'),
+      document.querySelector('[data-testid="editor-sider"]'),
+      document.querySelector('[data-testid="editor-sider-ontology-list"]')?.parentElement,
+      document.querySelector('[data-testid="editor-sider-top-pane"]'),
+    ].filter(Boolean);
+  }
+
+  /**
+   * S2 value = last Step option in the selection array ("incomplete").
+   * Call with a Step instance selected so the value radios are visible.
+   */
+  function selectIncompleteStepOption() {
+    for (const root of stepSelectionRoots()) {
+      const opts = scrapeOrderedStepSelectionOptions(root);
+      if (!opts.length) continue;
+      const hit =
+        opts.find((o) => o.incomplete || isIncompleteStepLabel(o.label)) ||
+        opts[opts.length - 1];
+      if (!hit) continue;
+      const target =
+        hit.el?.querySelector?.("label.ant-radio-wrapper, label, input[type='radio']") ||
+        hit.el?.closest?.("label") ||
+        hit.el;
+      try {
+        (target || hit.el).click();
+        return {
+          ok: true,
+          via: "radio",
+          label: hit.label,
+          incomplete: !!hit.incomplete,
+          options: opts.map((o) => o.label.slice(0, 40)),
+        };
+      } catch {
+        /* try next root */
+      }
+    }
+    // Same hotkey as Grade incomplete when the option is focused
+    pressEditorKey("i");
+    return { ok: true, via: "hotkey-i", label: "incomplete", incomplete: true, options: null };
+  }
+
+  async function applyIncompleteStepToRange(range) {
+    if (!range?.el) return { ok: false, error: "no-range" };
+    try {
+      range.el.click();
+    } catch {
+      return { ok: false, error: "click-failed" };
+    }
+    await sleep(220);
+    return selectIncompleteStepOption();
   }
 
   function activateStepClass() {
@@ -1092,6 +1297,100 @@
     return null;
   }
 
+  /**
+   * Grade value radios under Trajectory → Grade (DOM order), e.g.
+   * -1, 0, 1, 3, 4, 5, incomplete. Last entry is "incomplete".
+   */
+  function scrapeOrderedGradeValueOptions(root) {
+    if (!root) return [];
+    const ordered = [];
+    const seen = new Set();
+
+    const push = (raw, el) => {
+      if (!el || isInTimelineChrome(el) || isInLabelsPane(el)) return;
+      const t = normalizeLabel(raw);
+      if (!t || t.length > 24) return;
+      if (/^grade$/i.test(t) || /^step\b/i.test(t) || /^trajectory$/i.test(t)) return;
+      if (!/^-?\d+$/.test(t) && !/^incomplete$/i.test(t)) return;
+      const key = t.toLowerCase();
+      if (seen.has(key)) return;
+      seen.add(key);
+      ordered.push({ label: t, el, order: ordered.length });
+    };
+
+    const treeItems = [...root.querySelectorAll('[role="treeitem"]')].filter((el) => {
+      const style = el.getAttribute("style") || "";
+      if (/display:\s*none/i.test(style)) return false;
+      return !!el.querySelector("label.ant-radio-wrapper, label, .ant-radio");
+    });
+    for (const item of treeItems) {
+      const title =
+        item.querySelector(".ant-tree-title") ||
+        item.querySelector("label.ant-radio-wrapper") ||
+        item.querySelector("label");
+      push(title?.textContent || item.textContent || "", item);
+    }
+
+    if (ordered.length < 2) {
+      for (const el of root.querySelectorAll("label.ant-radio-wrapper, .ant-tree label")) {
+        push(el.textContent || "", el);
+      }
+    }
+
+    return ordered;
+  }
+
+  /**
+   * G2 (post-last-step tail) must use the last Grade option = "incomplete".
+   * Call with a Grade instance selected so the value radios are visible.
+   */
+  function selectIncompleteGradeOption() {
+    const panel = document.querySelector('[data-testid="object-left-panel"]');
+    const roots = [
+      panel,
+      document.querySelector('[data-testid="editor-sider"]'),
+      document.querySelector('[data-testid="editor-sider-ontology-list"]')?.parentElement,
+    ].filter(Boolean);
+
+    for (const root of roots) {
+      const opts = scrapeOrderedGradeValueOptions(root);
+      if (!opts.length) continue;
+      const hit =
+        opts.find((o) => /^incomplete$/i.test(o.label)) || opts[opts.length - 1];
+      if (!hit) continue;
+      const target =
+        hit.el?.querySelector?.("label.ant-radio-wrapper, label, input[type='radio']") ||
+        hit.el?.closest?.("label") ||
+        hit.el;
+      try {
+        (target || hit.el).click();
+        return {
+          ok: true,
+          via: "radio",
+          label: hit.label,
+          options: opts.map((o) => o.label),
+        };
+      } catch {
+        /* try next root */
+      }
+    }
+
+    // Screenshot hotkey for incomplete is I
+    pressEditorKey("i");
+    return { ok: true, via: "hotkey-i", label: "incomplete", options: null };
+  }
+
+  async function applyIncompleteGradeToRange(range) {
+    if (!range?.el) return { ok: false, error: "no-range" };
+    try {
+      range.el.click();
+    } catch {
+      return { ok: false, error: "click-failed" };
+    }
+    await sleep(220);
+    return selectIncompleteGradeOption();
+  }
+
   /** Find editable Range start / Range end inputs (instance edit panel). */
   function findRangeBoundInputs() {
     // Exact aria labels from Encord object-left-panel (screenshot + DOM scan)
@@ -1384,6 +1683,14 @@
     const lockTail = opts.lockToSelectRange === true || matchStart > 1;
 
     function refreshActive() {
+      // Locked resize (G2 / Step tail): stay on the provided instance — never
+      // jump to a Grade that shares the same start frame.
+      if (lockTail && opts.selectRange?.el?.isConnected) {
+        const live = describeRange(opts.selectRange.el);
+        return live
+          ? withGradeFrames(live, getTotalFrames())
+          : withGradeFrames(opts.selectRange, getTotalFrames());
+      }
       const near = findGradeNearStart(matchStart, getTotalFrames());
       if (near) return near;
       if (opts.selectRange?.el?.isConnected) {
@@ -1746,10 +2053,260 @@
       pin = findGradeNearStart(at, total) || pin;
     }
 
+    // G2 = last Grade option in the selection array ("incomplete")
+    const gradeValue = await applyIncompleteGradeToRange(pin);
+    await sleep(80);
+
     if (findRangeBoundInputs() || pin) {
-      return { ok: true, via: jumped.ok ? "pin-at-frame" : "pin-provisional", created: true, frame: at, range: pin };
+      return {
+        ok: true,
+        via: jumped.ok ? "pin-at-frame" : "pin-provisional",
+        created: true,
+        frame: at,
+        range: pin,
+        gradeValue,
+      };
     }
-    return { ok: false, error: "create-tail-pin-failed", frame: at };
+    return { ok: false, error: "create-tail-pin-failed", frame: at, gradeValue };
+  }
+
+  /**
+   * Create a Step pin at `frame` for S2 (post-last-step tail).
+   * Success requires a discoverable pin element (geometry) — Range inputs alone
+   * are not enough (they may belong to another selection).
+   */
+  async function createStepPinAt(frame) {
+    const total = getTotalFrames();
+    const at = Math.max(0, Math.min(Math.floor(frame), episodeLastFrame(total) ?? Math.floor(frame)));
+    const before = new Set(listAllStepRanges(total).map((r) => r.el));
+
+    await clearInstanceSelection();
+    await focusPreferredGradeTile();
+    await sleep(40);
+    const activated = activateStepClass();
+    if (!activated) return { ok: false, error: "no-step-class" };
+    await sleep(180);
+
+    let selected = selectIncompleteStepOption();
+    await sleep(100);
+
+    const jumped = await goToFrame(at);
+    document.activeElement?.blur?.();
+    await sleep(40);
+
+    if (jumped.ok) {
+      clickControlByText([/this frame\s*&\s*save/i, /^this frame$/i, /this frame/i]);
+    } else if (total) {
+      const row = findRowByTestId("row-step");
+      if (row) {
+        const rect = row.getBoundingClientRect();
+        const x = rect.left + Math.max(4, (at / Math.max(1, total - 1)) * rect.width);
+        const y = rect.top + rect.height / 2;
+        const el = document.elementFromPoint(x, y) || row;
+        el.dispatchEvent(
+          new MouseEvent("click", {
+            bubbles: true,
+            cancelable: true,
+            clientX: x,
+            clientY: y,
+            altKey: true,
+            view: window,
+          })
+        );
+      }
+    }
+    await sleep(450);
+
+    let pin =
+      findStepTailByGeometry(at, total) ||
+      listAllStepRanges(total).find((r) => !before.has(r.el)) ||
+      null;
+    if (pin?.el) {
+      try {
+        pin.el.click();
+      } catch {
+        /* ignore */
+      }
+      await sleep(220);
+      pin = findStepTailByGeometry(at, total) || pin;
+      selected = selectIncompleteStepOption() || selected;
+      await sleep(80);
+    }
+
+    if (!pin?.el) {
+      return { ok: false, error: "create-step-tail-pin-failed", frame: at, selected };
+    }
+    return {
+      ok: true,
+      via: jumped.ok ? "pin-at-frame" : "pin-provisional",
+      created: true,
+      frame: at,
+      range: pin,
+      selected,
+    };
+  }
+
+  /** Expand Step pin → [start,end] like G2 (select + Fill + Range inputs). */
+  async function expandStepPinToRange(pin, start, end) {
+    const total = getTotalFrames();
+    if (!pin?.el) return { ok: false, error: "no-step-pin" };
+
+    try {
+      pin.el.click();
+    } catch {
+      /* ignore */
+    }
+    await sleep(180);
+    await goToFrame(end);
+    await sleep(80);
+    clickFillToPlayhead();
+    await sleep(280);
+
+    let wrote = await resizeViaRangeInputs(start, end, {
+      matchStart: start,
+      selectRange: pin,
+      lockToSelectRange: true,
+    });
+    await sleep(100);
+
+    let step = findStepTailByGeometry(start, total) || pin;
+    const spanOk =
+      step &&
+      Math.abs(step.startFrame - start) <= BOUND_EPS &&
+      Math.abs(step.endFrame - end) <= BOUND_EPS &&
+      (step.span ?? step.endFrame - step.startFrame) > 2;
+
+    if (wrote.ok && spanOk) {
+      return { ok: true, via: wrote.via || "range-inputs", step };
+    }
+
+    // Second pass: re-select + fill + set both bounds
+    step = findStepTailByGeometry(start, total) || step;
+    if (step?.el) {
+      try {
+        step.el.click();
+      } catch {
+        /* ignore */
+      }
+      await sleep(150);
+    }
+    await goToFrame(end);
+    await sleep(60);
+    clickFillToPlayhead();
+    await sleep(220);
+    const bounds = findRangeBoundInputs();
+    if (bounds) {
+      await setInputFrame(bounds.start, start);
+      await sleep(80);
+      await setInputFrame(bounds.end, end);
+      await sleep(140);
+    }
+    wrote = await resizeViaRangeInputs(start, end, {
+      matchStart: start,
+      selectRange: step || pin,
+      lockToSelectRange: true,
+    });
+    await sleep(100);
+    step = findStepTailByGeometry(start, total) || step;
+    const ok =
+      step &&
+      Math.abs(step.startFrame - start) <= BOUND_EPS &&
+      Math.abs(step.endFrame - end) <= BOUND_EPS &&
+      (step.span ?? 0) > 2;
+    return {
+      ok: !!ok,
+      via: wrote.via || (bounds ? "fill+inputs" : "unknown"),
+      step,
+      wrote,
+    };
+  }
+
+  /**
+   * After G2 is complete: S2 = incomplete Step from lastStepEnd+1 → episode end.
+   * Finds pins by geometry (empty labels). Expands before setting incomplete. Esc.
+   */
+  async function ensureIncompleteStepTail({ tailStart, episodeEnd }) {
+    const total = getTotalFrames();
+    if (episodeEnd == null || tailStart == null || tailStart > episodeEnd) {
+      return { ok: true, skipped: true, reason: "no-step-tail-frames" };
+    }
+
+    function findTailStep() {
+      return findStepTailByGeometry(tailStart, total);
+    }
+
+    function isReady(s) {
+      return (
+        s &&
+        (s.span ?? s.endFrame - s.startFrame) > 2 &&
+        Math.abs(s.startFrame - tailStart) <= BOUND_EPS &&
+        Math.abs(s.endFrame - episodeEnd) <= BOUND_EPS
+      );
+    }
+
+    let step = findTailStep();
+    if (isReady(step) && (step.incomplete || isIncompleteStepLabel(step.label))) {
+      pressEditorKey("Escape");
+      await sleep(80);
+      return { ok: true, skipped: true, reason: "step-tail-already-synced", step, label: "incomplete" };
+    }
+
+    // Create pin at tailStart if missing / wrong start
+    if (!step || Math.abs((step.startFrame ?? -1) - tailStart) > 2) {
+      const created = await createStepPinAt(tailStart);
+      if (!created.ok) {
+        return { ok: false, error: created.error || "create-step-tail-failed", created };
+      }
+      step = findTailStep() || created.range;
+      if (!step?.el) {
+        return { ok: false, error: "no-step-tail-instance", created };
+      }
+    }
+
+    // Expand pin → episode end (geometry-backed; do not trust Range inputs alone)
+    let wrote = { ok: false };
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      step = findTailStep() || step;
+      wrote = await expandStepPinToRange(step, tailStart, episodeEnd);
+      await sleep(120);
+      step = findTailStep() || wrote.step || step;
+      if (isReady(step)) break;
+    }
+
+    step = findTailStep() || step;
+    if (!isReady(step)) {
+      return {
+        ok: false,
+        error: "step-tail-expand-failed",
+        step,
+        wrote,
+        expected: { start: tailStart, end: episodeEnd },
+      };
+    }
+
+    // Incomplete only after a real span exists
+    const stepValue = await applyIncompleteStepToRange(step);
+    await sleep(80);
+
+    await blurRangeFrameInputs();
+    pressEditorKey("Escape");
+    await sleep(100);
+
+    step = findTailStep() || step;
+    const ok =
+      isReady(step) &&
+      (step.incomplete || isIncompleteStepLabel(step.label) || stepValue?.ok);
+    return {
+      ok,
+      via: wrote.via || "expand+incomplete+esc",
+      label: "incomplete",
+      startFrame: tailStart,
+      endFrame: episodeEnd,
+      wrote,
+      stepValue,
+      step,
+      error: ok ? undefined : "step-tail-incomplete-or-bounds",
+    };
   }
 
   function snapshot() {
@@ -1801,13 +2358,23 @@
       Math.abs((gradeEndFrame ?? -1) - targetEndFrame) > BOUND_EPS;
 
     const tailGrade = hasTail ? findGradeNearStart(tailStart, totalFrames) : null;
+    const stepTail = hasTail
+      ? findStepNearStart(tailStart, { incomplete: true, totalFrames }) ||
+        findStepNearStart(tailStart, { totalFrames })
+      : null;
     const tailOk =
       !hasTail ||
       (tailGrade &&
         (tailGrade.span ?? tailGrade.endFrame - tailGrade.startFrame) > 2 &&
         Math.abs(tailGrade.startFrame - tailStart) <= BOUND_EPS &&
         Math.abs(tailGrade.endFrame - episodeEnd) <= BOUND_EPS);
-    const needsSync = primaryNeedsSync || !tailOk;
+    const stepTailOk =
+      !hasTail ||
+      (stepTail &&
+        (stepTail.span ?? stepTail.endFrame - stepTail.startFrame) > 2 &&
+        Math.abs(stepTail.startFrame - tailStart) <= BOUND_EPS &&
+        Math.abs(stepTail.endFrame - episodeEnd) <= BOUND_EPS);
+    const needsSync = primaryNeedsSync || !tailOk || !stepTailOk;
 
     return {
       ready: true,
@@ -1835,15 +2402,28 @@
             span: tailGrade.span,
           }
         : null,
+      stepTail: stepTail
+        ? {
+            stepNum: stepTail.stepNum,
+            incomplete: !!stepTail.incomplete,
+            label: (stepTail.label || "").slice(0, 40),
+            startFrame: stepTail.startFrame,
+            endFrame: stepTail.endFrame,
+            span: stepTail.span,
+          }
+        : null,
       target: { startFrame: 0, endFrame: targetEndFrame, startPct: 0, endPct: targetEndPct },
       tailTarget: hasTail ? { startFrame: tailStart, endFrame: episodeEnd } : null,
+      stepTailTarget: hasTail
+        ? { label: "incomplete", startFrame: tailStart, endFrame: episodeEnd }
+        : null,
       needsSync,
       gradeCount: listGradeRanges().length,
       definedSteps: defined,
       timelineMaxStep: timelineMax
         ? { stepNum: timelineMax.stepNum, endFrame: pctToEndFrame(timelineMax.end, totalFrames) }
         : null,
-      key: `step${lastStep.stepNum}:${targetEndFrame}:${totalFrames}:tail${hasTail ? `${tailStart}-${episodeEnd}` : "none"}`,
+      key: `step${lastStep.stepNum}:${targetEndFrame}:${totalFrames}:tail${hasTail ? `${tailStart}-${episodeEnd}` : "none"}:s2=incomplete`,
     };
   }
 
@@ -1991,6 +2571,7 @@
         }
         const tailStart = endFrame + 1;
         let wroteTail = { ok: true, skipped: true, reason: "no-tail-frames" };
+        let wroteStepTail = { ok: true, skipped: true, reason: "no-tail-frames" };
         if (episodeEnd != null && tailStart <= episodeEnd) {
           let tail = findGradeNearStart(tailStart, total);
           // Prefer an existing non-primary grade in the tail region; avoid the primary.
@@ -2133,36 +2714,75 @@
               }
             }
           }
+          // G2 value = last Grade option in the selection array ("incomplete")
+          const tailForValue =
+            findGradeNearStart(tailStart, total) || tailAfter || tail;
+          let gradeValue = null;
+          if (wroteTail.ok !== false && tailForValue?.el) {
+            gradeValue = await applyIncompleteGradeToRange(tailForValue);
+            wroteTail = { ...wroteTail, gradeValue };
+            await sleep(60);
+          }
           primaryEnd = findPrimaryGradeRange()?.endFrame ?? endFrame;
+
+          // S2 ONLY after G2 is fully in place: incomplete Step (last option)
+          // from lastStepEnd+1 → episode end, then Esc.
+          if (wroteTail.ok !== false) {
+            wroteStepTail = await ensureIncompleteStepTail({
+              tailStart,
+              episodeEnd,
+            });
+          } else {
+            wroteStepTail = { ok: true, skipped: true, reason: "grade-tail-failed" };
+          }
         }
 
         const after = snapshot();
         lastAppliedKey = snap.key;
         await blurRangeFrameInputs();
+        pressEditorKey("Escape");
+        await sleep(60);
         if (!quiet) {
           const tailBit =
             wroteTail.skipped && wroteTail.reason === "no-tail-frames"
               ? ""
               : wroteTail.ok
-                ? ` + ${tailStart}–${episodeEnd}`
-                : ` (tail ${tailStart}–${episodeEnd} failed)`;
+                ? ` + G2 ${tailStart}–${episodeEnd}`
+                : ` (G2 ${tailStart}–${episodeEnd} failed)`;
+          const stepTailBit =
+            wroteStepTail.skipped &&
+            (wroteStepTail.reason === "no-tail-frames" ||
+              wroteStepTail.reason === "grade-tail-failed")
+              ? ""
+              : wroteStepTail.ok
+                ? ` + S2 incomplete ${tailStart}–${episodeEnd}`
+                : ` (S2 failed)`;
           const msg = ensured.created
-            ? `Grade 0–${primaryEnd}${tailBit} (step ${snap.lastStep.stepNum})`
-            : `Grade set 0–${primaryEnd}${tailBit} (step ${snap.lastStep.stepNum})`;
+            ? `Grade 0–${primaryEnd}${tailBit}${stepTailBit}`
+            : `Grade set 0–${primaryEnd}${tailBit}${stepTailBit}`;
           if (lastToastKey !== msg) {
             lastToastKey = msg;
-            showToast(msg, wroteTail.ok === false ? "warn" : "ok");
+            showToast(
+              msg,
+              wroteTail.ok === false || wroteStepTail.ok === false ? "warn" : "ok"
+            );
           }
         }
         return {
-          ok: wroteTail.ok !== false,
-          method: "ensure+range-inputs+tail",
+          ok: wroteTail.ok !== false && wroteStepTail.ok !== false,
+          method: "ensure+range-inputs+tail+step-tail",
           snap: after,
           ensured,
           wrote,
           wroteTail,
+          wroteStepTail,
           primaryEnd,
-          error: wroteTail.ok === false ? wroteTail.error : undefined,
+          error:
+            wroteTail.ok === false
+              ? wroteTail.error
+              : wroteStepTail.ok === false
+                ? wroteStepTail.error
+                : undefined,
         };
       }
 
