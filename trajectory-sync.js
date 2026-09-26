@@ -2,7 +2,7 @@
 // Write path: Encord classification UI (frame jump + C/V/M or Range start/end inputs).
 // No timeline draw-drag / alt-click / shift-click (those create single-frame pins).
 (() => {
-  const VERSION = "0.18.30-grade";
+  const VERSION = "0.18.31-grade";
   const STORAGE_ENABLED = "autoGradeEnabled";
   // v2 key — invalidates bad caches that stored lastStepNum=2 from truncated scrapes
   const STORAGE_DEFINED_STEPS = "gradeSyncDefinedStepsV2";
@@ -2178,8 +2178,12 @@
   }
 
   /**
-   * Grow a pin/short bar to [start,end]: Fill at start, Fill at end if needed,
-   * then medium inputs (skip setRangeFast — post-Fill it almost always misses and wastes ~300ms).
+   * Grow a pin/short bar to [start,end], then commit exact bounds.
+   * Success always requires timelineMatches (BOUND_EPS) — never “close enough”.
+   *
+   * When the pin sits at wantEnd (typical G2), Fill at midpoint first so we do not
+   * Fill-at-start into G1’s edge (that trims G1 by 1). Exact start/end come from inputs.
+   * When the pin already sits at wantStart (typical S2 / G1), Fill once at wantEnd.
    */
   async function expandPinToRange(range, startFrame, endFrame, opts = {}) {
     const total = getTotalFrames();
@@ -2217,24 +2221,45 @@
 
     let active = refresh() || withGradeFrames(describeRange(range.el) || range, total);
     let geo = timelineBounds(active);
+    const pinAtEnd =
+      geo &&
+      geo.span <= 2 &&
+      Math.abs((geo.startFrame ?? geo.endFrame ?? -1) - wantEnd) <= 2 &&
+      wantEnd - wantStart > 4;
+    const pinAtStart =
+      geo && geo.span <= 2 && Math.abs((geo.startFrame ?? -1) - wantStart) <= 1;
 
-    // Critical: Fill at wantStart first (G2 pin lives at episode end — Fill-at-end is a no-op)
-    if (!geo || geo.span <= 2 || Math.abs((geo.startFrame ?? -1) - wantStart) > BOUND_EPS) {
-      await fillRangeToFrame(active || range, wantStart, { wantStart, wantSpan: true });
+    if (pinAtEnd) {
+      // Non-abutting grow: mid → (end if needed) → exact inputs below
+      const mid = Math.floor((wantStart + wantEnd) / 2);
+      await fillRangeToFrame(active || range, mid, { wantSpan: true });
       active = refresh() || active;
       geo = timelineBounds(active);
-    }
-    if (!geo || (geo.endFrame ?? -1) < wantEnd) {
-      await fillRangeToFrame(active || range, wantEnd, { wantEnd });
+      if (!geo || (geo.endFrame ?? -1) < wantEnd) {
+        await fillRangeToFrame(active || range, wantEnd, { wantEnd });
+        active = refresh() || active;
+        geo = timelineBounds(active);
+      }
+    } else if (pinAtStart) {
+      await fillRangeToFrame(active || range, wantEnd, { wantEnd, wantSpan: true });
       active = refresh() || active;
       geo = timelineBounds(active);
-    }
-
-    // Still a pin — one more Fill at end only (start usually stuck after first Fill)
-    if (!geo || geo.span <= 2) {
-      await fillRangeToFrame(active || range, wantEnd, { wantSpan: true, wantEnd });
-      active = refresh() || active;
-      geo = timelineBounds(active);
+    } else {
+      if (!geo || geo.span <= 2 || Math.abs((geo.startFrame ?? -1) - wantStart) > BOUND_EPS) {
+        await fillRangeToFrame(active || range, wantStart, { wantStart, wantSpan: true });
+        active = refresh() || active;
+        geo = timelineBounds(active);
+      }
+      if (!geo || (geo.endFrame ?? -1) < wantEnd) {
+        await fillRangeToFrame(active || range, wantEnd, { wantEnd });
+        active = refresh() || active;
+        geo = timelineBounds(active);
+      }
+      if (!geo || geo.span <= 2) {
+        await fillRangeToFrame(active || range, wantEnd, { wantSpan: true, wantEnd });
+        active = refresh() || active;
+        geo = timelineBounds(active);
+      }
     }
 
     if (timelineMatches(wantStart, wantEnd, active)) {
@@ -2242,7 +2267,7 @@
       return { ok: true, via: "expand+fill", after: geo, range: active };
     }
 
-    // Medium commit directly (setRangeFast after Fill was consistently failing → expand+medium)
+    // Exact commit via Range inputs (+ Adjust only to reach exact match)
     if (active?.el) {
       try {
         active.el.click();
@@ -2290,7 +2315,7 @@
       if (timelineMatches(wantStart, wantEnd, active)) {
         return {
           ok: true,
-          via: "expand+medium",
+          via: pinAtEnd ? "expand+mid+exact" : "expand+medium",
           after: timelineBounds(active),
           range: active,
         };
@@ -3205,6 +3230,7 @@
       g2ResizeMs: 0,
       g2Via: null,
       g1RestoreMs: 0,
+      g1RestoreVia: null,
       g2RecheckMs: 0,
       g2IncompleteMs: 0,
       s2Ms: 0,
@@ -3362,20 +3388,24 @@
             wroteTail = { ok: true, skipped: true, reason: "tail-already-synced" };
           }
 
-          // Re-assert G1 after G2 — Encord / mistaken Fill can still trim primary by 1.
+          // Re-assert G1 after G2 — only if exact bounds broken (Fill-at-start used to trim by 1).
           primaryGeo = findPrimaryGradeRange();
           if (
-            !primaryGeo ||
-            Math.abs((primaryGeo.endFrame ?? -1) - endFrame) > BOUND_EPS ||
-            Math.abs((primaryGeo.startFrame ?? -1) - 0) > BOUND_EPS
+            primaryGeo &&
+            Math.abs((primaryGeo.endFrame ?? -1) - endFrame) <= BOUND_EPS &&
+            Math.abs((primaryGeo.startFrame ?? -1) - 0) <= BOUND_EPS
           ) {
+            timing.g1RestoreVia = "unneeded";
+          } else {
             tPhase = nowMs();
             const restorePrimary = await resizeRangeSmart(0, endFrame, { matchStart: 0 });
             timing.g1RestoreMs = msSince(tPhase);
+            timing.g1RestoreVia = restorePrimary.path || restorePrimary.via || null;
             primaryGeo = findPrimaryGradeRange();
             if (
               !restorePrimary.ok ||
-              Math.abs((primaryGeo?.endFrame ?? -1) - endFrame) > BOUND_EPS
+              Math.abs((primaryGeo?.endFrame ?? -1) - endFrame) > BOUND_EPS ||
+              Math.abs((primaryGeo?.startFrame ?? -1) - 0) > BOUND_EPS
             ) {
               timing.totalMs = msSince(tSync);
               logSyncTiming(timing, false);
@@ -3393,78 +3423,77 @@
             }
           }
 
-          // G1 restore / blur often leaves G2 short of episode end — always re-check.
-          // Episode last frame == totalFrames; verify CSS and Range end input.
+          // G2 recheck — geometry first; no settle sleep when already exact.
           tPhase = nowMs();
-          await sleep(W.med);
           let tailAfter = findGradeNearStart(tailStart, total);
           if (tailAfter && tailAfter.startFrame > 1) {
             const startOk = Math.abs(tailAfter.startFrame - tailStart) <= BOUND_EPS;
             let endOk = Math.abs((tailAfter.endFrame ?? -1) - episodeEnd) <= BOUND_EPS;
-            if (!endOk) {
-              try {
-                tailAfter.el.click();
-                await sleep(W.panel);
-                const b = findRangeBoundInputs();
-                const endVal = b
-                  ? Number(String(b.end.value || "").replace(/[^\d]/g, ""))
-                  : null;
-                if (endVal != null && Math.abs(endVal - episodeEnd) <= BOUND_EPS) {
-                  endOk = true;
-                }
-              } catch {
-                /* ignore */
-              }
-            }
-            if (!startOk) {
-              wroteTail = await resizeRangeSmart(tailStart, episodeEnd, {
-                matchStart: tailStart,
-                selectRange: tailAfter,
-                lockToSelectRange: true,
-              });
-              tailAfter = findGradeNearStart(tailStart, total) || tailAfter;
-            } else if (!endOk) {
-              const extended = await extendGradeEndOnly(tailAfter, episodeEnd, {
-                matchStart: tailStart,
-              });
-              wroteTail = extended.ok
-                ? { ok: true, via: "extend-end-only", extended }
-                : { ok: false, error: extended.error || "tail-end-short", extended };
-              tailAfter = findGradeNearStart(tailStart, total) || tailAfter;
-            }
-            // Final end check even after full resize
-            if (wroteTail.ok !== false && tailAfter) {
-              let stillShort =
-                Math.abs((tailAfter.endFrame ?? -1) - episodeEnd) > BOUND_EPS;
-              if (stillShort) {
+            if (!(startOk && endOk)) {
+              if (!endOk) {
                 try {
                   tailAfter.el.click();
-                  await sleep(W.med);
+                  await sleep(W.short);
                   const b = findRangeBoundInputs();
                   const endVal = b
                     ? Number(String(b.end.value || "").replace(/[^\d]/g, ""))
                     : null;
                   if (endVal != null && Math.abs(endVal - episodeEnd) <= BOUND_EPS) {
-                    stillShort = false;
+                    endOk = true;
                   }
                 } catch {
                   /* ignore */
                 }
               }
-              if (stillShort) {
+              if (!startOk) {
+                wroteTail = await resizeRangeSmart(tailStart, episodeEnd, {
+                  matchStart: tailStart,
+                  selectRange: tailAfter,
+                  lockToSelectRange: true,
+                });
+                tailAfter = findGradeNearStart(tailStart, total) || tailAfter;
+              } else if (!endOk) {
                 const extended = await extendGradeEndOnly(tailAfter, episodeEnd, {
                   matchStart: tailStart,
                 });
-                if (!extended.ok) {
-                  wroteTail = {
-                    ok: false,
-                    error: "tail-end-short",
-                    extended,
-                    endFrame: tailAfter.endFrame,
-                    wantEnd: episodeEnd,
-                  };
-                } else {
-                  wroteTail = { ok: true, via: "extend-end-only-final", extended };
+                wroteTail = extended.ok
+                  ? { ok: true, via: "extend-end-only", extended }
+                  : { ok: false, error: extended.error || "tail-end-short", extended };
+                tailAfter = findGradeNearStart(tailStart, total) || tailAfter;
+              }
+              if (wroteTail.ok !== false && tailAfter) {
+                let stillShort =
+                  Math.abs((tailAfter.endFrame ?? -1) - episodeEnd) > BOUND_EPS;
+                if (stillShort) {
+                  try {
+                    tailAfter.el.click();
+                    await sleep(W.short);
+                    const b = findRangeBoundInputs();
+                    const endVal = b
+                      ? Number(String(b.end.value || "").replace(/[^\d]/g, ""))
+                      : null;
+                    if (endVal != null && Math.abs(endVal - episodeEnd) <= BOUND_EPS) {
+                      stillShort = false;
+                    }
+                  } catch {
+                    /* ignore */
+                  }
+                }
+                if (stillShort) {
+                  const extended = await extendGradeEndOnly(tailAfter, episodeEnd, {
+                    matchStart: tailStart,
+                  });
+                  if (!extended.ok) {
+                    wroteTail = {
+                      ok: false,
+                      error: "tail-end-short",
+                      extended,
+                      endFrame: tailAfter.endFrame,
+                      wantEnd: episodeEnd,
+                    };
+                  } else {
+                    wroteTail = { ok: true, via: "extend-end-only-final", extended };
+                  }
                 }
               }
             }
