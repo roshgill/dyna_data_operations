@@ -2,7 +2,7 @@
 // Write path: Encord classification UI (frame jump + C/V/M or Range start/end inputs).
 // No timeline draw-drag / alt-click / shift-click (those create single-frame pins).
 (() => {
-  const VERSION = "0.18.31-grade";
+  const VERSION = "0.18.33-grade";
   const STORAGE_ENABLED = "autoGradeEnabled";
   // v2 key — invalidates bad caches that stored lastStepNum=2 from truncated scrapes
   const STORAGE_DEFINED_STEPS = "gradeSyncDefinedStepsV2";
@@ -2180,10 +2180,7 @@
   /**
    * Grow a pin/short bar to [start,end], then commit exact bounds.
    * Success always requires timelineMatches (BOUND_EPS) — never “close enough”.
-   *
-   * When the pin sits at wantEnd (typical G2), Fill at midpoint first so we do not
-   * Fill-at-start into G1’s edge (that trims G1 by 1). Exact start/end come from inputs.
-   * When the pin already sits at wantStart (typical S2 / G1), Fill once at wantEnd.
+   * Pin at start → Fill at end; otherwise Fill at start then end; then exact inputs.
    */
   async function expandPinToRange(range, startFrame, endFrame, opts = {}) {
     const total = getTotalFrames();
@@ -2221,30 +2218,15 @@
 
     let active = refresh() || withGradeFrames(describeRange(range.el) || range, total);
     let geo = timelineBounds(active);
-    const pinAtEnd =
-      geo &&
-      geo.span <= 2 &&
-      Math.abs((geo.startFrame ?? geo.endFrame ?? -1) - wantEnd) <= 2 &&
-      wantEnd - wantStart > 4;
     const pinAtStart =
       geo && geo.span <= 2 && Math.abs((geo.startFrame ?? -1) - wantStart) <= 1;
 
-    if (pinAtEnd) {
-      // Non-abutting grow: mid → (end if needed) → exact inputs below
-      const mid = Math.floor((wantStart + wantEnd) / 2);
-      await fillRangeToFrame(active || range, mid, { wantSpan: true });
-      active = refresh() || active;
-      geo = timelineBounds(active);
-      if (!geo || (geo.endFrame ?? -1) < wantEnd) {
-        await fillRangeToFrame(active || range, wantEnd, { wantEnd });
-        active = refresh() || active;
-        geo = timelineBounds(active);
-      }
-    } else if (pinAtStart) {
+    if (pinAtStart) {
       await fillRangeToFrame(active || range, wantEnd, { wantEnd, wantSpan: true });
       active = refresh() || active;
       geo = timelineBounds(active);
     } else {
+      // Critical: Fill at wantStart first (G2 pin lives at episode end — Fill-at-end is a no-op)
       if (!geo || geo.span <= 2 || Math.abs((geo.startFrame ?? -1) - wantStart) > BOUND_EPS) {
         await fillRangeToFrame(active || range, wantStart, { wantStart, wantSpan: true });
         active = refresh() || active;
@@ -2315,7 +2297,7 @@
       if (timelineMatches(wantStart, wantEnd, active)) {
         return {
           ok: true,
-          via: pinAtEnd ? "expand+mid+exact" : "expand+medium",
+          via: "expand+medium",
           after: timelineBounds(active),
           range: active,
         };
@@ -2328,6 +2310,78 @@
       via: "expand-pin",
       after: timelineBounds(active),
       range: active,
+    };
+  }
+
+  /**
+   * Exact G1 restore when start is already 0 and end is short by 1–2 frames.
+   * Only writes/adjusts the end; succeeds only if timelineMatches(0, wantEnd).
+   */
+  async function quickRestorePrimaryEnd(wantEnd) {
+    const want = Math.max(0, Math.floor(wantEnd));
+    const primary = findPrimaryGradeRange();
+    if (!primary?.el) return { ok: false, error: "no-primary" };
+    const geo0 = timelineBounds(primary);
+    if (!geo0) return { ok: false, error: "no-geo" };
+    const startOk = Math.abs((geo0.startFrame ?? -1) - 0) <= BOUND_EPS;
+    const shortBy = want - (geo0.endFrame ?? -1);
+    if (!startOk || shortBy < 1 || shortBy > 2) {
+      return { ok: false, error: "not-quick-candidate", geo: geo0, shortBy };
+    }
+
+    try {
+      primary.el.click();
+    } catch {
+      return { ok: false, error: "click-failed" };
+    }
+    await sleep(W.short);
+    await waitUntil(() => !!findRangeBoundInputs(), { timeout: 200, interval: W.tick });
+
+    adjustRightSide(shortBy);
+    await sleep(W.short);
+    let bounds = findRangeBoundInputs();
+    if (bounds) {
+      await setInputFrame(bounds.end, want);
+      await sleep(W.short);
+    }
+    await blurRangeFrameInputs();
+    await sleep(W.tick);
+
+    const primary1 = findPrimaryGradeRange() || primary;
+    if (timelineMatches(0, want, primary1)) {
+      return { ok: true, via: "quick-end-exact", after: timelineBounds(primary1), shortBy };
+    }
+
+    // One more exact end write
+    try {
+      primary1.el.click();
+    } catch {
+      /* ignore */
+    }
+    await sleep(W.short);
+    bounds = findRangeBoundInputs();
+    if (bounds) {
+      await setInputFrame(bounds.end, want);
+      await sleep(W.short);
+    }
+    adjustRightSide(1);
+    await sleep(W.short);
+    bounds = findRangeBoundInputs();
+    if (bounds) {
+      await setInputFrame(bounds.end, want);
+      await sleep(W.short);
+    }
+    await blurRangeFrameInputs();
+    await sleep(W.tick);
+
+    const primary2 = findPrimaryGradeRange() || primary1;
+    const ok = timelineMatches(0, want, primary2);
+    return {
+      ok,
+      via: ok ? "quick-end-exact" : "quick-end-miss",
+      after: timelineBounds(primary2),
+      shortBy,
+      error: ok ? undefined : "quick-end-not-exact",
     };
   }
 
@@ -3321,7 +3375,10 @@
         let primaryEnd = primaryGeo?.endFrame ?? endFrame;
         if (primaryEnd < endFrame && endFrame - primaryEnd <= 2) {
           tPhase = nowMs();
-          const fixShort = await resizeRangeSmart(0, endFrame, { matchStart: 0 });
+          let fixShort = await quickRestorePrimaryEnd(endFrame);
+          if (!fixShort.ok) {
+            fixShort = await resizeRangeSmart(0, endFrame, { matchStart: 0 });
+          }
           timing.g1RetryMs += msSince(tPhase);
           primaryGeo = findPrimaryGradeRange();
           primaryEnd = primaryGeo?.endFrame ?? primaryEnd;
@@ -3398,9 +3455,12 @@
             timing.g1RestoreVia = "unneeded";
           } else {
             tPhase = nowMs();
-            const restorePrimary = await resizeRangeSmart(0, endFrame, { matchStart: 0 });
+            let restorePrimary = await quickRestorePrimaryEnd(endFrame);
+            if (!restorePrimary.ok) {
+              restorePrimary = await resizeRangeSmart(0, endFrame, { matchStart: 0 });
+            }
             timing.g1RestoreMs = msSince(tPhase);
-            timing.g1RestoreVia = restorePrimary.path || restorePrimary.via || null;
+            timing.g1RestoreVia = restorePrimary.via || restorePrimary.path || null;
             primaryGeo = findPrimaryGradeRange();
             if (
               !restorePrimary.ok ||
