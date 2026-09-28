@@ -2,7 +2,7 @@
 // Write path: Encord classification UI (frame jump + C/V/M or Range start/end inputs).
 // No timeline draw-drag / alt-click / shift-click (those create single-frame pins).
 (() => {
-  const VERSION = "0.18.33-grade";
+  const VERSION = "0.18.36-grade";
   const STORAGE_ENABLED = "autoGradeEnabled";
   // v2 key — invalidates bad caches that stored lastStepNum=2 from truncated scrapes
   const STORAGE_DEFINED_STEPS = "gradeSyncDefinedStepsV2";
@@ -3675,7 +3675,10 @@
     }
   }
 
-  /** After Step edit → Escape/Done, fit Grade only if ontology last Step is on the timeline. */
+  /**
+   * Auto annotation: Esc/Done → full sync once per snap.key when last defined Step is present.
+   * Manual Sync Grade uses force:true and bypasses this one-shot.
+   */
   function scheduleWorkflowSync() {
     if (!enabled || syncing) return;
     clearTimeout(debounceTimer);
@@ -3684,51 +3687,18 @@
         const defined = await ensureDefinedLastStep();
         if (!defined?.lastStepNum) return;
         if (!findStepRangeByNum(defined.lastStepNum)) return;
+        const snap = snapshot();
+        if (!snap.ready) return;
+        // One-shot: already annotated this step/end/episode key
+        if (snap.key === lastAppliedKey) return;
         await syncGrade({ quiet: false });
       })().catch(() => {});
     }, WORKFLOW_DEBOUNCE_MS);
   }
 
-  /**
-   * When the last defined Step's end moves on the timeline (e.g. drag ±1 frame),
-   * re-fit Grade to match — without waiting for Escape/Done.
-   */
+  /** Resize/drag no longer auto-annotates — Esc/Done one-shot is the only auto path. */
   function scheduleLastStepResizeSync() {
-    if (!enabled || syncing) return;
-    clearTimeout(lastStepResizeTimer);
-    lastStepResizeTimer = setTimeout(() => {
-      (async () => {
-        const defined = await ensureDefinedLastStep();
-        if (!defined?.lastStepNum) return;
-        const lastRange = findStepRangeByNum(defined.lastStepNum);
-        if (!lastRange) return;
-
-        const total = getTotalFrames();
-        if (!total) return;
-        const endFrame = pctToEndFrame(lastRange.end, total);
-        const endKey = `step${defined.lastStepNum}:${endFrame}:${total}`;
-
-        // Still settling / unchanged
-        if (endKey === lastObservedStepEndKey && endKey === lastAppliedKey) return;
-
-        const grade = findPrimaryGradeRange();
-        // Only auto-refit when Grade already exists (creation stays Escape/Done gated)
-        if (!grade) {
-          lastObservedStepEndKey = endKey;
-          return;
-        }
-
-        const gradeEnd = pctToEndFrame(grade.end, total);
-        const gradeStart = pctToFrame(grade.left, total);
-        const already =
-          Math.abs(gradeStart - 0) <= BOUND_EPS &&
-          Math.abs(gradeEnd - endFrame) <= BOUND_EPS;
-        lastObservedStepEndKey = endKey;
-        if (already) return;
-
-        await syncGrade({ quiet: true });
-      })().catch(() => {});
-    }, LAST_STEP_RESIZE_DEBOUNCE_MS);
+    /* intentionally no-op */
   }
 
   function ensureStepRowObserver() {
@@ -3761,7 +3731,7 @@
     try {
       const stored = await chrome.storage.local.get(STORAGE_ENABLED);
       if (typeof stored[STORAGE_ENABLED] === "boolean") enabled = stored[STORAGE_ENABLED];
-      else enabled = true; // on by default — Escape/Done after last *defined* Step
+      else enabled = true; // on by default — one-shot annotation after Esc/Done
     } catch {
       enabled = true;
     }
@@ -3869,7 +3839,7 @@
       enabled = message.enabled !== false;
       chrome.storage.local.set({ [STORAGE_ENABLED]: enabled }).then(() => {
         sendResponse({ ok: true, enabled });
-        if (enabled) scheduleWorkflowSync();
+        // Do not sync on toggle — wait for Esc/Done after last defined Step
       });
       return true;
     }

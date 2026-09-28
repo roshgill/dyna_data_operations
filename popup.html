@@ -30,17 +30,16 @@
       </section>
 
       <section class="dev-tools">
-        <p class="meta">[ GRADE ]</p>
-        <div hidden>
-          <p class="hint compact">
-            Auto-fit runs after the last defined Step is on the timeline (Escape / Done),
-            and again if that Step’s end is adjusted. Sync Grade now still forces a pass.
-          </p>
-          <label class="toggle-row">
-            <input id="auto-grade" type="checkbox" checked />
-            <span>Auto-fit Grade after last defined Step</span>
-          </label>
-        </div>
+        <p class="meta">[ ANNOTATION ]</p>
+        <label class="switch-row">
+          <input id="auto-grade" type="checkbox" role="switch" checked />
+          <span class="switch" aria-hidden="true"></span>
+          <span>Auto-annotate after last Step (Esc/Done)</span>
+        </label>
+        <p class="hint compact">
+          When on, runs once after Esc/Done once the last defined Step is on the timeline.
+          Sync Grade now still forces a pass.
+        </p>
         <p id="grade-status" class="hint compact" aria-live="polite"></p>
         <div class="actions">
           <button id="grade-sync" type="button">Sync Grade now</button>
@@ -63,7 +62,7 @@
       </section>
 
       <footer class="foot">
-        <span class="meta">v0.18.33</span>
+        <span class="meta">v0.18.36</span>
       </footer>
     </main>
     <script src="layout-ops.js"></script>

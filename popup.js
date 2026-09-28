@@ -155,7 +155,7 @@ autoLayoutEl.addEventListener("change", async () => {
 autoGradeEl.addEventListener("change", async () => {
   try {
     await LayoutOps.setGradeEnabled(await resolveTargetTab(), autoGradeEl.checked);
-    setStatus(autoGradeEl.checked ? "Auto Grade on." : "Auto Grade off.");
+    setStatus(autoGradeEl.checked ? "Auto annotation on." : "Auto annotation off.");
     await refreshGradeStatus();
   } catch (err) {
     setStatus(err.message || String(err));
