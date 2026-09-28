@@ -1,5 +1,5 @@
 (() => {
-  const VERSION = "0.18.36";
+  const VERSION = "0.18.40";
   const STORAGE_KEY = "preferredCameras";
   const LAYOUT_KEY = "preferredMosaicLayout";
   const PREFERRED_ACTIVE_TILE = "cam_high";
@@ -559,6 +559,8 @@
 
   function showToast(message, kind = "info") {
     const existing = document.getElementById("encord-camera-layout-toast");
+    // Never clobber annotation in-progress chip
+    if (existing?.dataset?.encordToastMode === "progress") return;
     if (existing) existing.remove();
 
     const el = document.createElement("div");
@@ -584,14 +586,15 @@
       right: "16px",
       bottom: "16px",
       zIndex: "2147483647",
-      maxWidth: "420px",
-      padding: "10px 14px",
-      borderRadius: "10px",
+      maxWidth: "200px",
+      minWidth: "120px",
+      padding: "8px 10px",
+      borderRadius: "8px",
       background: palette.background,
       color: palette.color,
       border: palette.border,
-      font: '13px/1.35 "Avenir Next", "Segoe UI", "Helvetica Neue", Helvetica, sans-serif',
-      boxShadow: "0 4px 16px rgba(26, 26, 26, 0.08)",
+      font: '12px/1.3 "Avenir Next", "Segoe UI", "Helvetica Neue", Helvetica, sans-serif',
+      boxShadow: "0 3px 12px rgba(26, 26, 26, 0.08)",
       opacity: "0",
       transition: "opacity .15s ease",
       pointerEvents: "none",

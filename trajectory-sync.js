@@ -2,7 +2,7 @@
 // Write path: Encord classification UI (frame jump + C/V/M or Range start/end inputs).
 // No timeline draw-drag / alt-click / shift-click (those create single-frame pins).
 (() => {
-  const VERSION = "0.18.36-grade";
+  const VERSION = "0.18.40-grade";
   const STORAGE_ENABLED = "autoGradeEnabled";
   // v2 key — invalidates bad caches that stored lastStepNum=2 from truncated scrapes
   const STORAGE_DEFINED_STEPS = "gradeSyncDefinedStepsV2";
@@ -32,6 +32,9 @@
   let lastToastKey = "";
   let lastAppliedKey = "";
   let lastObservedStepEndKey = "";
+  /** Auto annotation runs once per episode; further last-Step edits do not re-trigger. */
+  let autoAnnotatedOnce = false;
+  let autoAnnotatedEpisodeKey = "";
   let stepRowObserver = null;
   /** @type {{ projectKey: string, lastStepNum: number, steps: { stepNum: number, label: string }[], via: string } | null} */
   let definedStepsCache = null;
@@ -86,13 +89,96 @@
     }
   }
 
-  function showToast(message, kind = "info") {
-    const existing = document.getElementById("encord-camera-layout-toast");
-    if (existing) existing.remove();
+  let toastHideTimer = null;
+  let progressDotsTimer = null;
 
-    const el = document.createElement("div");
-    el.id = "encord-camera-layout-toast";
+  function ensureToastHost() {
+    let el = document.getElementById("encord-camera-layout-toast");
+    if (!el) {
+      el = document.createElement("div");
+      el.id = "encord-camera-layout-toast";
+      document.documentElement.appendChild(el);
+    }
+    return el;
+  }
+
+  function clearToastHide() {
+    if (toastHideTimer != null) {
+      clearTimeout(toastHideTimer);
+      toastHideTimer = null;
+    }
+  }
+
+  function clearProgressDots() {
+    if (progressDotsTimer != null) {
+      clearInterval(progressDotsTimer);
+      progressDotsTimer = null;
+    }
+  }
+
+  function applyToastShell(el, palette) {
+    Object.assign(el.style, {
+      position: "fixed",
+      right: "16px",
+      bottom: "16px",
+      zIndex: "2147483647",
+      maxWidth: "200px",
+      minWidth: "120px",
+      padding: "8px 10px",
+      borderRadius: "8px",
+      background: palette.background,
+      color: palette.color,
+      border: palette.border,
+      font: '12px/1.3 "Avenir Next", "Segoe UI", "Helvetica Neue", Helvetica, sans-serif',
+      fontWeight: "500",
+      letterSpacing: "-0.01em",
+      boxShadow: "0 3px 12px rgba(26, 26, 26, 0.08)",
+      transition: "opacity .15s ease",
+      pointerEvents: "none",
+    });
+  }
+
+  /**
+   * In-progress chip — stays up until showToast/dismissProgress.
+   * Text only: "Annotating" + cycling dots (no bar).
+   */
+  function showProgress(base = "Annotating") {
+    clearToastHide();
+    clearProgressDots();
+    const el = ensureToastHost();
+    el.dataset.encordToastMode = "progress";
+    applyToastShell(el, {
+      background: "#f2f0e9",
+      color: "#1a1a1a",
+      border: "1px solid rgba(26, 26, 26, 0.12)",
+    });
+    let step = 0;
+    const paint = () => {
+      el.textContent = base + ".".repeat((step % 3) + 1);
+      step += 1;
+    };
+    paint();
+    el.style.opacity = "1";
+    progressDotsTimer = setInterval(paint, 400);
+  }
+
+  function dismissProgress() {
+    const el = document.getElementById("encord-camera-layout-toast");
+    if (!el || el.dataset.encordToastMode !== "progress") return;
+    clearToastHide();
+    clearProgressDots();
+    el.style.opacity = "0";
+    setTimeout(() => {
+      if (el.dataset.encordToastMode === "progress") el.remove();
+    }, 200);
+  }
+
+  function showToast(message, kind = "info") {
+    clearToastHide();
+    clearProgressDots();
+    const el = ensureToastHost();
     el.textContent = message;
+    el.dataset.encordToastMode = "toast";
     const palette =
       kind === "error" || kind === "warn"
         ? {
@@ -105,31 +191,14 @@
             color: "#1a1a1a",
             border: "1px solid rgba(26, 26, 26, 0.12)",
           };
-
-    Object.assign(el.style, {
-      position: "fixed",
-      right: "16px",
-      bottom: "16px",
-      zIndex: "2147483647",
-      maxWidth: "420px",
-      padding: "10px 14px",
-      borderRadius: "10px",
-      background: palette.background,
-      color: palette.color,
-      border: palette.border,
-      font: '13px/1.35 "Avenir Next", "Segoe UI", "Helvetica Neue", Helvetica, sans-serif',
-      boxShadow: "0 4px 16px rgba(26, 26, 26, 0.08)",
-      opacity: "0",
-      transition: "opacity .15s ease",
-      pointerEvents: "none",
-    });
-    document.documentElement.appendChild(el);
-    requestAnimationFrame(() => {
-      el.style.opacity = "1";
-    });
-    setTimeout(() => {
+    applyToastShell(el, palette);
+    el.style.opacity = "1";
+    toastHideTimer = setTimeout(() => {
       el.style.opacity = "0";
-      setTimeout(() => el.remove(), 200);
+      toastHideTimer = setTimeout(() => {
+        if (el.dataset.encordToastMode === "toast") el.remove();
+        toastHideTimer = null;
+      }, 200);
     }, 3200);
   }
 
@@ -201,6 +270,20 @@
   function getProjectKey() {
     const m = location.pathname.match(/\/label_editor\/([^/]+)/);
     return m ? m[1] : location.pathname;
+  }
+
+  /** Project + data unit — used to reset one-shot auto annotation on episode change. */
+  function getEpisodeKey() {
+    const m = location.pathname.match(/\/label_editor\/([^/]+\/[^/]+)/);
+    return m ? m[1] : location.pathname;
+  }
+
+  function resetAutoAnnotateIfEpisodeChanged() {
+    const key = getEpisodeKey();
+    if (key !== autoAnnotatedEpisodeKey) {
+      autoAnnotatedEpisodeKey = key;
+      autoAnnotatedOnce = false;
+    }
   }
 
   function isInTimelineChrome(el) {
@@ -2935,8 +3018,7 @@
     let spanOk =
       step &&
       Math.abs(step.startFrame - start) <= BOUND_EPS &&
-      Math.abs(step.endFrame - end) <= BOUND_EPS &&
-      (step.span ?? step.endFrame - step.startFrame) > 2;
+      Math.abs(step.endFrame - end) <= BOUND_EPS;
 
     if (wrote.ok && spanOk) {
       return { ok: true, via: wrote.via || "expand-pin", step };
@@ -2952,8 +3034,7 @@
     spanOk =
       step &&
       Math.abs(step.startFrame - start) <= BOUND_EPS &&
-      Math.abs(step.endFrame - end) <= BOUND_EPS &&
-      (step.span ?? 0) > 2;
+      Math.abs(step.endFrame - end) <= BOUND_EPS;
     return {
       ok: !!(wrote.ok && spanOk),
       via: wrote.via || "range-inputs",
@@ -2982,7 +3063,6 @@
     function isReady(s) {
       return (
         s &&
-        (s.span ?? s.endFrame - s.startFrame) > 2 &&
         Math.abs(s.startFrame - tailStart) <= BOUND_EPS &&
         Math.abs(s.endFrame - episodeEnd) <= BOUND_EPS
       );
@@ -3147,13 +3227,11 @@
     const tailOk =
       !hasTail ||
       (tailGrade &&
-        (tailGrade.span ?? tailGrade.endFrame - tailGrade.startFrame) > 2 &&
         Math.abs(tailGrade.startFrame - tailStart) <= BOUND_EPS &&
         Math.abs(tailGrade.endFrame - episodeEnd) <= BOUND_EPS);
     const stepTailOk =
       !hasTail ||
       (stepTail &&
-        (stepTail.span ?? stepTail.endFrame - stepTail.startFrame) > 2 &&
         Math.abs(stepTail.startFrame - tailStart) <= BOUND_EPS &&
         Math.abs(stepTail.endFrame - episodeEnd) <= BOUND_EPS);
     const needsSync = primaryNeedsSync || !tailOk || !stepTailOk;
@@ -3272,6 +3350,7 @@
     }
 
     syncing = true;
+    if (!quiet) showProgress("Annotating");
     const tSync = nowMs();
     const timing = {
       focusMs: 0,
@@ -3313,10 +3392,8 @@
         logSyncTiming(timing, false);
         if (!quiet) {
           const msg = "Could not open/create trajectory for Grade sync.";
-          if (lastToastKey !== msg) {
-            lastToastKey = msg;
-            showToast(msg, "warn");
-          }
+          lastToastKey = msg;
+          showToast(msg, "warn");
         }
         return { ok: false, error: ensured.error || "ensure-failed", ensured, snap, timing };
       }
@@ -3406,7 +3483,6 @@
           if (tail && tail.startFrame <= 1) tail = null;
           const tailReady =
             tail &&
-            (tail.span ?? 0) > 2 &&
             Math.abs(tail.startFrame - tailStart) <= BOUND_EPS &&
             Math.abs(tail.endFrame - episodeEnd) <= BOUND_EPS;
           if (!tailReady) {
@@ -3628,10 +3704,8 @@
           const msg = ensured.created
             ? `Grade 0–${primaryEnd}${tailBit}${stepBit}${timeBit}`
             : `Grade set 0–${primaryEnd}${tailBit}${stepBit}${timeBit}`;
-          if (lastToastKey !== msg) {
-            lastToastKey = msg;
-            showToast(msg, syncOk ? "ok" : "warn");
-          }
+          lastToastKey = msg;
+          showToast(msg, syncOk ? "ok" : "warn");
         }
         return {
           ok: syncOk,
@@ -3660,38 +3734,46 @@
           wrote.error === "cannot-set-timeline-range"
             ? `Could not commit Grade on the timeline (${wrote.timeline?.startFrame ?? "?"}–${wrote.timeline?.endFrame ?? "?"} vs 0–${endFrame}).`
             : `Could not set Range start/end (${wrote.error || "failed"}).`;
-        if (lastToastKey !== msg) {
-          lastToastKey = msg;
-          showToast(msg, "warn");
-        }
+        lastToastKey = msg;
+        showToast(msg, "warn");
       }
       return { ok: false, error: wrote.error || "range-inputs-failed", ensured, wrote, snap, timing };
     } catch (err) {
       timing.totalMs = msSince(tSync);
       logSyncTiming(timing, false);
+      if (!quiet) {
+        showToast(err?.message || "Annotation failed.", "warn");
+      }
       return { ok: false, error: err?.message || String(err), snap, timing };
     } finally {
       syncing = false;
+      // If a failure path skipped showToast, clear the in-progress chip
+      if (!quiet) dismissProgress();
     }
   }
 
   /**
-   * Auto annotation: Esc/Done → full sync once per snap.key when last defined Step is present.
-   * Manual Sync Grade uses force:true and bypasses this one-shot.
+   * Auto annotation: Esc/Done → full sync once per episode when last defined Step is present.
+   * Further last-Step edits do not re-run. Manual Sync Grade (force:true) bypasses this.
    */
   function scheduleWorkflowSync() {
     if (!enabled || syncing) return;
     clearTimeout(debounceTimer);
     debounceTimer = setTimeout(() => {
       (async () => {
+        resetAutoAnnotateIfEpisodeChanged();
+        if (autoAnnotatedOnce) return;
         const defined = await ensureDefinedLastStep();
         if (!defined?.lastStepNum) return;
         if (!findStepRangeByNum(defined.lastStepNum)) return;
         const snap = snapshot();
         if (!snap.ready) return;
-        // One-shot: already annotated this step/end/episode key
-        if (snap.key === lastAppliedKey) return;
-        await syncGrade({ quiet: false });
+        const result = await syncGrade({ quiet: false });
+        // Lock only after a real successful auto pass (not skip/fail)
+        if (result?.ok && !result?.skipped) {
+          autoAnnotatedOnce = true;
+          autoAnnotatedEpisodeKey = getEpisodeKey();
+        }
       })().catch(() => {});
     }, WORKFLOW_DEBOUNCE_MS);
   }
