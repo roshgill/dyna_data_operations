@@ -11,7 +11,7 @@ function installContextMenus() {
   chrome.contextMenus.removeAll(() => {
     chrome.contextMenus.create({
       id: MENU.GRADE_SYNC,
-      title: "Sync Grade now",
+      title: "Annotate now",
       contexts: ["action"],
     });
     chrome.contextMenus.create({
@@ -50,7 +50,7 @@ async function withErrorToast(tab, fn) {
 }
 
 const ACTION_TITLE =
-  "Dyna Ops: Encord Camera Layout. Click to restore · Right click for Sync Grade | save | details";
+  "Dyna Ops: Encord Automations. Click to restore · Right click for Annotate now | save | details";
 
 chrome.runtime.onInstalled.addListener(() => {
   installContextMenus();

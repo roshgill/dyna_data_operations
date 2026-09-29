@@ -2,7 +2,7 @@
 // Write path: Encord classification UI (frame jump + C/V/M or Range start/end inputs).
 // No timeline draw-drag / alt-click / shift-click (those create single-frame pins).
 (() => {
-  const VERSION = "0.18.42-grade";
+  const VERSION = "0.18.48-grade";
   const STORAGE_ENABLED = "autoGradeEnabled";
   // v2 key — invalidates bad caches that stored lastStepNum=2 from truncated scrapes
   const STORAGE_DEFINED_STEPS = "gradeSyncDefinedStepsV2";
@@ -3322,14 +3322,26 @@
       return { ok: false, skipped: true, reason: "not-editor" };
     }
 
+    function toastWaiting(wantStep) {
+      if (quiet) return;
+      const msg =
+        wantStep != null && Number.isFinite(Number(wantStep))
+          ? `Waiting for Step ${wantStep}`
+          : "Waiting for Step list";
+      lastToastKey = msg;
+      showToast(msg, "info");
+    }
+
     // Auto path: require ontology last Step id, and that it exists on the timeline.
     if (!force) {
       const defined = await ensureDefinedLastStep();
       if (!defined?.lastStepNum) {
+        toastWaiting(null);
         return { ok: false, skipped: true, reason: "no-defined-steps" };
       }
       const onTimeline = findStepRangeByNum(defined.lastStepNum);
       if (!onTimeline) {
+        toastWaiting(defined.lastStepNum);
         return {
           ok: false,
           skipped: true,
@@ -3339,12 +3351,35 @@
         };
       }
     } else {
-      // Manual sync: refresh defined steps so target prefers ontology last if present
-      await ensureDefinedLastStep();
+      // Manual Annotate now: refresh defined steps so target prefers ontology last if present
+      const defined = await ensureDefinedLastStep();
+      if (!defined?.lastStepNum) {
+        toastWaiting(null);
+        return { ok: false, skipped: true, reason: "no-defined-steps", defined };
+      }
+      if (!findStepRangeByNum(defined.lastStepNum)) {
+        toastWaiting(defined.lastStepNum);
+        return {
+          ok: false,
+          skipped: true,
+          reason: "waiting-for-last-defined-step",
+          wantStep: defined.lastStepNum,
+          timelineMax: findLastTimelineStepRange()?.stepNum ?? null,
+        };
+      }
     }
 
     const snap = snapshot();
-    if (!snap.ready) return { ok: false, skipped: true, reason: snap.reason, snap };
+    if (!snap.ready) {
+      if (
+        snap.reason === "last-defined-step-not-on-timeline" ||
+        snap.reason === "no-last-step" ||
+        snap.reason === "no-defined-steps"
+      ) {
+        toastWaiting(snap.definedSteps?.lastStepNum ?? null);
+      }
+      return { ok: false, skipped: true, reason: snap.reason, snap };
+    }
     if (!snap.needsSync && !force) {
       return { ok: true, skipped: true, reason: "already-synced", snap };
     }
@@ -3681,29 +3716,7 @@
         const syncOk = wroteTail.ok !== false && wroteStepTail.ok !== false;
         logSyncTiming(timing, syncOk);
         if (!quiet) {
-          const tailBit =
-            wroteTail.skipped && wroteTail.reason === "no-tail-frames"
-              ? ""
-              : wroteTail.ok
-                ? ` + G2 incomplete ${tailStart}–${episodeEnd}`
-                : ` (G2 ${tailStart}–${episodeEnd} failed)`;
-          const stepBit =
-            wroteStepTail.skipped &&
-            (wroteStepTail.reason === "no-step-tail-frames" ||
-              wroteStepTail.reason === "no-tail-frames" ||
-              wroteStepTail.reason === "g2-failed")
-              ? ""
-              : wroteStepTail.ok
-                ? ` + S2 incomplete ${tailStart}–${episodeEnd}`
-                : ` (S2 failed)`;
-          const timeBit = ` · ${formatTimingSecs(timing.totalMs)}s (g1 ${formatTimingSecs(
-            timing.g1Ms + timing.g1RetryMs
-          )} g2 ${formatTimingSecs(
-            timing.g2CreateMs + timing.g2ResizeMs + timing.g2RecheckMs + timing.g2IncompleteMs
-          )} s2 ${formatTimingSecs(timing.s2Ms)})`;
-          const msg = ensured.created
-            ? `Grade 0–${primaryEnd}${tailBit}${stepBit}${timeBit}`
-            : `Grade set 0–${primaryEnd}${tailBit}${stepBit}${timeBit}`;
+          const msg = syncOk ? "Annotation complete" : "Annotation incomplete";
           lastToastKey = msg;
           showToast(msg, syncOk ? "ok" : "warn");
         }
@@ -3754,7 +3767,7 @@
 
   /**
    * Auto annotation: Esc/Done → full sync once per episode when last defined Step is present.
-   * Further last-Step edits do not re-run. Manual Sync Grade (force:true) bypasses this.
+   * Further last-Step edits do not re-run. Manual Annotate now (force:true) bypasses this.
    */
   function scheduleWorkflowSync() {
     if (!enabled || syncing) return;

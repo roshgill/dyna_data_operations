@@ -44,7 +44,24 @@ main {
 }
 
 .hero {
-  margin-bottom: 28px;
+  margin-bottom: 8px;
+}
+
+.panel {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px dotted var(--border);
+  display: grid;
+  gap: 10px;
+}
+
+.panel:first-of-type {
+  border-top: none;
+  padding-top: 0;
+}
+
+.auto-layout-row {
+  margin: 0;
 }
 
 .meta {
@@ -58,7 +75,7 @@ main {
 }
 
 h1 {
-  margin: 10px 0 8px;
+  margin: 0 0 4px;
   font-size: 22px;
   font-weight: 600;
   letter-spacing: -0.03em;
