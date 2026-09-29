@@ -1,10 +1,6 @@
 const statusEl = document.getElementById("status");
 const saveBtn = document.getElementById("save");
 const restoreBtn = document.getElementById("restore");
-const scanBtn = document.getElementById("scan");
-const scanFullBtn = document.getElementById("scan-full");
-const copyScanBtn = document.getElementById("copy-scan");
-const scanOut = document.getElementById("scan-out");
 const autoLayoutEl = document.getElementById("auto-layout");
 const autoGradeEl = document.getElementById("auto-grade");
 const gradeStatusEl = document.getElementById("grade-status");
@@ -34,8 +30,6 @@ function setStatus(message) {
 function setBusy(busy) {
   saveBtn.disabled = busy;
   restoreBtn.disabled = busy;
-  scanBtn.disabled = busy;
-  scanFullBtn.disabled = busy;
   gradeSyncBtn.disabled = busy;
 }
 
@@ -155,7 +149,7 @@ autoLayoutEl.addEventListener("change", async () => {
 autoGradeEl.addEventListener("change", async () => {
   try {
     await LayoutOps.setGradeEnabled(await resolveTargetTab(), autoGradeEl.checked);
-    setStatus(autoGradeEl.checked ? "Auto Grade on." : "Auto Grade off.");
+    setStatus(autoGradeEl.checked ? "Auto annotation on." : "Auto annotation off.");
     await refreshGradeStatus();
   } catch (err) {
     setStatus(err.message || String(err));
@@ -170,16 +164,17 @@ gradeSyncBtn.addEventListener("click", async () => {
     // Background focuses the Encord tab first so Grade create isn't stuck on an unfocused page.
     const result = await chrome.runtime.sendMessage({ type: "OPS_GRADE_SYNC_NOW", tab });
     if (result?.ok) {
-      const end = result.snap?.target?.endFrame ?? result.snap?.lastStep?.endFrame;
-      const step = result.snap?.lastStep?.stepNum;
-      const tail = result.snap?.tailTarget || result.wroteTail?.want;
-      const tailPart =
-        tail && result.wroteTail?.ok !== false && result.wroteTail?.reason !== "no-tail-frames"
-          ? ` + ${tail.startFrame ?? result.snap?.tailGrade?.startFrame}–${tail.endFrame ?? result.snap?.tailGrade?.endFrame}`
-          : "";
-      setStatus(`Grade 0–${end}${tailPart} (step ${step}).`);
+      setStatus("Annotation complete");
+    } else if (
+      result?.reason === "waiting-for-last-defined-step" ||
+      result?.reason === "last-defined-step-not-on-timeline"
+    ) {
+      const n = result.wantStep ?? result.snap?.definedSteps?.lastStepNum;
+      setStatus(n != null ? `Waiting for Step ${n}` : "Waiting for Step list");
+    } else if (result?.reason === "no-defined-steps" || result?.reason === "no-last-step") {
+      setStatus("Waiting for Step list");
     } else {
-      const why = result?.error || result?.reason || "Grade sync skipped.";
+      const why = result?.error || result?.reason || "Annotation skipped.";
       setStatus(why);
     }
     await refreshGradeStatus();
@@ -187,45 +182,6 @@ gradeSyncBtn.addEventListener("click", async () => {
     setStatus(err.message || String(err));
   } finally {
     setBusy(false);
-  }
-});
-
-async function runScan(kind) {
-  setBusy(true);
-  setStatus(kind === "full" ? "Scanning full episode DOM…" : "Scanning timeline…");
-  copyScanBtn.disabled = true;
-  try {
-    const tab = await resolveTargetTab();
-    const result =
-      kind === "full" ? await LayoutOps.scanFullDom(tab) : await LayoutOps.scanTimeline(tab);
-    scanOut.value = result.report || JSON.stringify(result, null, 2);
-    copyScanBtn.disabled = !scanOut.value;
-    const s = result.summary || {};
-    if (kind === "full") {
-      const kb = Math.round((s.chars || scanOut.value.length) / 1024);
-      setStatus(`Full DOM ready (~${kb} KB). Copy and paste to Cursor.`);
-    } else {
-      setStatus("Timeline scan ready. Copy and paste to Cursor.");
-    }
-  } catch (err) {
-    scanOut.value = "";
-    setStatus(err.message || String(err));
-  } finally {
-    setBusy(false);
-  }
-}
-
-scanFullBtn.addEventListener("click", () => runScan("full"));
-scanBtn.addEventListener("click", () => runScan("timeline"));
-
-copyScanBtn.addEventListener("click", async () => {
-  try {
-    await navigator.clipboard.writeText(scanOut.value);
-    setStatus("Copied scan result.");
-  } catch {
-    scanOut.focus();
-    scanOut.select();
-    setStatus("Copy failed — select the text and copy manually.");
   }
 });
 

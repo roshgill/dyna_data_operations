@@ -1,6 +1,7 @@
 importScripts("layout-ops.js");
 
 const MENU = {
+  GRADE_SYNC: "encord-grade-sync",
   SAVE: "encord-layout-save",
   DETAILS: "encord-layout-details",
   RESTORE: "encord-layout-restore",
@@ -8,6 +9,11 @@ const MENU = {
 
 function installContextMenus() {
   chrome.contextMenus.removeAll(() => {
+    chrome.contextMenus.create({
+      id: MENU.GRADE_SYNC,
+      title: "Annotate now",
+      contexts: ["action"],
+    });
     chrome.contextMenus.create({
       id: MENU.RESTORE,
       title: "Restore layout",
@@ -43,11 +49,12 @@ async function withErrorToast(tab, fn) {
   }
 }
 
+const ACTION_TITLE =
+  "Dyna Ops: Encord Automations. Click to restore · Right click for Annotate now | save | details";
+
 chrome.runtime.onInstalled.addListener(() => {
   installContextMenus();
-  chrome.action.setTitle({
-    title: "Dyna Ops: Encord Camera Layout. Click to restore layout · Right click to save layout | details",
-  });
+  chrome.action.setTitle({ title: ACTION_TITLE });
 });
 
 chrome.runtime.onStartup.addListener(() => {
@@ -60,6 +67,10 @@ chrome.action.onClicked.addListener((tab) => {
 });
 
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
+  if (info.menuItemId === MENU.GRADE_SYNC) {
+    await withErrorToast(tab, () => LayoutOps.gradeSyncNow(tab));
+    return;
+  }
   if (info.menuItemId === MENU.RESTORE) {
     await withErrorToast(tab, () => LayoutOps.restore(tab));
     return;
@@ -114,6 +125,4 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 // Ensure menus exist after extension reload / SW wake.
 installContextMenus();
-chrome.action.setTitle({
-  title: "Dyna Ops: Encord Camera Layout. Click to restore layout · Right click to save layout | details",
-});
+chrome.action.setTitle({ title: ACTION_TITLE });

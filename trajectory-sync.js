@@ -2,7 +2,7 @@
 // Write path: Encord classification UI (frame jump + C/V/M or Range start/end inputs).
 // No timeline draw-drag / alt-click / shift-click (those create single-frame pins).
 (() => {
-  const VERSION = "0.18.7-grade";
+  const VERSION = "0.18.48-grade";
   const STORAGE_ENABLED = "autoGradeEnabled";
   // v2 key — invalidates bad caches that stored lastStepNum=2 from truncated scrapes
   const STORAGE_DEFINED_STEPS = "gradeSyncDefinedStepsV2";
@@ -13,6 +13,15 @@
   const BOUND_EPS = 0; // Grade vs Step end — 1 frame is a real change, not noise
   const WORKFLOW_DEBOUNCE_MS = 550;
   const LAST_STEP_RESIZE_DEBOUNCE_MS = 450;
+  /** UI settle waits — keep low; success paths early-exit / poll. */
+  const W = {
+    tick: 20,
+    short: 40,
+    med: 60,
+    panel: 80,
+    settle: 80,
+    create: 280,
+  };
 
   if (window.__encordGradeSync?.version === VERSION) return;
 
@@ -23,6 +32,9 @@
   let lastToastKey = "";
   let lastAppliedKey = "";
   let lastObservedStepEndKey = "";
+  /** Auto annotation runs once per episode; further last-Step edits do not re-trigger. */
+  let autoAnnotatedOnce = false;
+  let autoAnnotatedEpisodeKey = "";
   let stepRowObserver = null;
   /** @type {{ projectKey: string, lastStepNum: number, steps: { stepNum: number, label: string }[], via: string } | null} */
   let definedStepsCache = null;
@@ -36,13 +48,137 @@
     return new Promise((r) => setTimeout(r, ms));
   }
 
-  function showToast(message, kind = "info") {
-    const existing = document.getElementById("encord-camera-layout-toast");
-    if (existing) existing.remove();
+  function nowMs() {
+    return typeof performance !== "undefined" && performance.now ? performance.now() : Date.now();
+  }
 
-    const el = document.createElement("div");
-    el.id = "encord-camera-layout-toast";
+  function msSince(t0) {
+    return Math.max(0, Math.round(nowMs() - t0));
+  }
+
+  async function waitUntil(pred, { timeout = 400, interval = 20 } = {}) {
+    const t0 = nowMs();
+    for (;;) {
+      try {
+        if (pred()) return true;
+      } catch {
+        /* ignore */
+      }
+      if (msSince(t0) >= timeout) {
+        try {
+          return !!pred();
+        } catch {
+          return false;
+        }
+      }
+      await sleep(interval);
+    }
+  }
+
+  /** Compact phase timings for toast / console (ms → one decimal seconds). */
+  function formatTimingSecs(ms) {
+    if (ms == null || !Number.isFinite(ms)) return "?";
+    return (ms / 1000).toFixed(1);
+  }
+
+  function logSyncTiming(timing, ok) {
+    try {
+      console.info("[encord-grade-sync] timing", { ok, ...timing });
+    } catch {
+      /* ignore */
+    }
+  }
+
+  let toastHideTimer = null;
+  let progressDotsTimer = null;
+
+  function ensureToastHost() {
+    let el = document.getElementById("encord-camera-layout-toast");
+    if (!el) {
+      el = document.createElement("div");
+      el.id = "encord-camera-layout-toast";
+      document.documentElement.appendChild(el);
+    }
+    return el;
+  }
+
+  function clearToastHide() {
+    if (toastHideTimer != null) {
+      clearTimeout(toastHideTimer);
+      toastHideTimer = null;
+    }
+  }
+
+  function clearProgressDots() {
+    if (progressDotsTimer != null) {
+      clearInterval(progressDotsTimer);
+      progressDotsTimer = null;
+    }
+  }
+
+  function applyToastShell(el, palette) {
+    Object.assign(el.style, {
+      position: "fixed",
+      right: "16px",
+      bottom: "16px",
+      zIndex: "2147483647",
+      maxWidth: "200px",
+      minWidth: "120px",
+      padding: "8px 10px",
+      borderRadius: "8px",
+      background: palette.background,
+      color: palette.color,
+      border: palette.border,
+      font: '12px/1.3 "Avenir Next", "Segoe UI", "Helvetica Neue", Helvetica, sans-serif',
+      fontWeight: "500",
+      letterSpacing: "-0.01em",
+      boxShadow: "0 3px 12px rgba(26, 26, 26, 0.08)",
+      transition: "opacity .15s ease",
+      pointerEvents: "none",
+    });
+  }
+
+  /**
+   * In-progress chip — stays up until showToast/dismissProgress.
+   * Text only: "Annotating" + cycling dots (no bar).
+   */
+  function showProgress(base = "Annotating") {
+    clearToastHide();
+    clearProgressDots();
+    const el = ensureToastHost();
+    el.dataset.encordToastMode = "progress";
+    applyToastShell(el, {
+      background: "#f2f0e9",
+      color: "#1a1a1a",
+      border: "1px solid rgba(26, 26, 26, 0.12)",
+    });
+    let step = 0;
+    const paint = () => {
+      el.textContent = base + ".".repeat((step % 3) + 1);
+      step += 1;
+    };
+    paint();
+    el.style.opacity = "1";
+    progressDotsTimer = setInterval(paint, 400);
+  }
+
+  function dismissProgress() {
+    const el = document.getElementById("encord-camera-layout-toast");
+    if (!el || el.dataset.encordToastMode !== "progress") return;
+    clearToastHide();
+    clearProgressDots();
+    el.style.opacity = "0";
+    setTimeout(() => {
+      if (el.dataset.encordToastMode === "progress") el.remove();
+    }, 200);
+  }
+
+  function showToast(message, kind = "info") {
+    clearToastHide();
+    clearProgressDots();
+    const el = ensureToastHost();
     el.textContent = message;
+    el.dataset.encordToastMode = "toast";
     const palette =
       kind === "error" || kind === "warn"
         ? {
@@ -55,31 +191,14 @@
             color: "#1a1a1a",
             border: "1px solid rgba(26, 26, 26, 0.12)",
           };
-
-    Object.assign(el.style, {
-      position: "fixed",
-      right: "16px",
-      bottom: "16px",
-      zIndex: "2147483647",
-      maxWidth: "420px",
-      padding: "10px 14px",
-      borderRadius: "10px",
-      background: palette.background,
-      color: palette.color,
-      border: palette.border,
-      font: '13px/1.35 "Avenir Next", "Segoe UI", "Helvetica Neue", Helvetica, sans-serif',
-      boxShadow: "0 4px 16px rgba(26, 26, 26, 0.08)",
-      opacity: "0",
-      transition: "opacity .15s ease",
-      pointerEvents: "none",
-    });
-    document.documentElement.appendChild(el);
-    requestAnimationFrame(() => {
-      el.style.opacity = "1";
-    });
-    setTimeout(() => {
+    applyToastShell(el, palette);
+    el.style.opacity = "1";
+    toastHideTimer = setTimeout(() => {
       el.style.opacity = "0";
-      setTimeout(() => el.remove(), 200);
+      toastHideTimer = setTimeout(() => {
+        if (el.dataset.encordToastMode === "toast") el.remove();
+        toastHideTimer = null;
+      }, 200);
     }, 3200);
   }
 
@@ -153,6 +272,20 @@
     return m ? m[1] : location.pathname;
   }
 
+  /** Project + data unit — used to reset one-shot auto annotation on episode change. */
+  function getEpisodeKey() {
+    const m = location.pathname.match(/\/label_editor\/([^/]+\/[^/]+)/);
+    return m ? m[1] : location.pathname;
+  }
+
+  function resetAutoAnnotateIfEpisodeChanged() {
+    const key = getEpisodeKey();
+    if (key !== autoAnnotatedEpisodeKey) {
+      autoAnnotatedEpisodeKey = key;
+      autoAnnotatedOnce = false;
+    }
+  }
+
   function isInTimelineChrome(el) {
     if (!el?.closest) return false;
     if (
@@ -180,24 +313,73 @@
   }
 
   function listTimelineSteps() {
-    return listRanges("row-step", { includePins: false })
-      .map((r) => ({ ...r, stepNum: parseStepNumber(r.label) }))
-      .filter((r) => r.stepNum != null && r.width >= 0.35);
+    return listRanges("row-step", { includePins: true })
+      .map((r) => {
+        const stepNum = parseStepNumber(r.label);
+        const incomplete = isIncompleteStepLabel(r.label);
+        return { ...r, stepNum, incomplete };
+      })
+      .filter((r) => (r.stepNum != null || r.incomplete) && (r.width >= 0.05 || r.pin));
+  }
+
+  /** Every Step timeline range including unlabeled pins (S2 create leaves empty labels). */
+  function listAllStepRanges(totalFrames = getTotalFrames()) {
+    return listRanges("row-step", { includePins: true })
+      .map((r) => {
+        const framed = withGradeFrames(r, totalFrames);
+        if (!framed) return null;
+        return {
+          ...framed,
+          stepNum: parseStepNumber(r.label),
+          incomplete: isIncompleteStepLabel(r.label),
+        };
+      })
+      .filter(Boolean);
+  }
+
+  /**
+   * S2 finder: geometry first (empty-label pins are invisible to label filters).
+   * Prefer pin / tiny range whose start is nearest to wantStart.
+   */
+  function findStepTailByGeometry(wantStart, totalFrames = getTotalFrames()) {
+    if (wantStart == null || !totalFrames) return null;
+    const all = listAllStepRanges(totalFrames);
+    if (!all.length) return null;
+    const tol = Math.max(BOUND_EPS, 3);
+    const near = all.filter((r) => Math.abs(r.startFrame - wantStart) <= tol);
+    const pool = near.length ? near : all.filter((r) => r.startFrame >= wantStart - tol);
+    if (!pool.length) return null;
+    // Prefer incomplete label, then pins / tiny spans, then closest start
+    pool.sort((a, b) => {
+      const aInc = a.incomplete || isIncompleteStepLabel(a.label) ? 0 : 1;
+      const bInc = b.incomplete || isIncompleteStepLabel(b.label) ? 0 : 1;
+      if (aInc !== bInc) return aInc - bInc;
+      const aPin = a.pin || a.span <= 2 ? 0 : 1;
+      const bPin = b.pin || b.span <= 2 ? 0 : 1;
+      if (aPin !== bPin) return aPin - bPin;
+      return (
+        Math.abs(a.startFrame - wantStart) - Math.abs(b.startFrame - wantStart) ||
+        b.left - a.left
+      );
+    });
+    return pool[0];
   }
 
   function findStepRangeByNum(stepNum) {
     const want = Number(stepNum);
     if (!Number.isFinite(want)) return null;
-    const matches = listTimelineSteps().filter((s) => s.stepNum === want);
+    const matches = listTimelineSteps().filter((s) => s.stepNum === want && !s.incomplete);
     if (!matches.length) return null;
     // Prefer the widest / rightmost instance of that step id
     matches.sort((a, b) => b.width - a.width || b.end - a.end);
     return matches[0];
   }
 
-  /** Rightmost/highest step currently drawn — NOT the ontology last step. */
+  /** Rightmost/highest numbered step currently drawn — NOT incomplete / ontology last. */
   function findLastTimelineStepRange() {
-    const steps = listTimelineSteps();
+    const steps = listTimelineSteps().filter(
+      (s) => s.stepNum != null && !s.incomplete && (s.width >= 0.35 || !s.pin)
+    );
     if (!steps.length) return null;
     const maxN = Math.max(...steps.map((s) => s.stepNum));
     return findStepRangeByNum(maxN);
@@ -222,9 +404,14 @@
     return Number.isFinite(stepNum) ? { stepNum, label: t.slice(0, 160) } : null;
   }
 
+  function isIncompleteStepLabel(raw) {
+    return /^incomplete$/i.test(normalizeLabel(raw));
+  }
+
   /**
    * Ontology Step options are an ordered list (tree / radio rows).
-   * Last defined = last object in that list (DOM order), not Math.max of a partial scrape.
+   * Numbered steps only — used for “last defined Step” (G1 end). Does not include
+   * the trailing "incomplete" option used for S2.
    */
   function scrapeOrderedStepOptions(root) {
     if (!root) return [];
@@ -240,6 +427,7 @@
         stepNum: parsed.stepNum,
         label: parsed.label,
         order: ordered.length,
+        el,
       });
     };
 
@@ -258,6 +446,56 @@
     }
 
     // 2) Fallback: radio labels in document order
+    if (ordered.length < 2) {
+      for (const el of root.querySelectorAll("label.ant-radio-wrapper, .ant-tree label")) {
+        push(el.textContent || "", el);
+      }
+    }
+
+    return ordered;
+  }
+
+  /**
+   * Full Step selection array including trailing "incomplete" (last entry).
+   * Used for S2 value — not for last-defined-step numbering.
+   */
+  function scrapeOrderedStepSelectionOptions(root) {
+    if (!root) return [];
+    const ordered = [];
+    const seen = new Set();
+
+    const push = (raw, el) => {
+      if (!el || isInTimelineChrome(el) || isInLabelsPane(el)) return;
+      const t = normalizeLabel(raw);
+      if (!t || t.length > 200) return;
+      const parsed = parseStepNumFromText(t);
+      const incomplete = isIncompleteStepLabel(t);
+      if (!parsed && !incomplete) return;
+      const key = incomplete ? "incomplete" : `step-${parsed.stepNum}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      ordered.push({
+        stepNum: parsed?.stepNum ?? null,
+        incomplete,
+        label: (parsed?.label || t).slice(0, 160),
+        order: ordered.length,
+        el,
+      });
+    };
+
+    const treeItems = [...root.querySelectorAll('[role="treeitem"]')].filter((el) => {
+      const style = el.getAttribute("style") || "";
+      if (/display:\s*none/i.test(style)) return false;
+      return !!el.querySelector("label.ant-radio-wrapper, label, .ant-radio");
+    });
+    for (const item of treeItems) {
+      const title =
+        item.querySelector(".ant-tree-title") ||
+        item.querySelector("label.ant-radio-wrapper") ||
+        item.querySelector("label");
+      push(title?.textContent || item.textContent || "", item);
+    }
+
     if (ordered.length < 2) {
       for (const el of root.querySelectorAll("label.ant-radio-wrapper, .ant-tree label")) {
         push(el.textContent || "", el);
@@ -290,6 +528,305 @@
   function lastDefinedFromSteps(steps) {
     if (!Array.isArray(steps) || !steps.length) return null;
     return steps[steps.length - 1];
+  }
+
+  /** First defined Step = first entry in the ordered ontology options array (Step 1). */
+  function firstDefinedFromSteps(steps) {
+    if (!Array.isArray(steps) || !steps.length) return null;
+    return steps[0];
+  }
+
+  function listTimelineStepsWithFrames(totalFrames = getTotalFrames()) {
+    if (!totalFrames) return [];
+    return listTimelineSteps()
+      .map((s) => {
+        const framed = withGradeFrames(s, totalFrames);
+        return framed
+          ? { ...framed, stepNum: s.stepNum, incomplete: !!s.incomplete }
+          : null;
+      })
+      .filter(Boolean);
+  }
+
+  /** Step whose start is nearest to wantStart (optional stepNum / incomplete filter). */
+  function findStepNearStart(
+    wantStart,
+    { stepNum = null, incomplete = false, totalFrames = getTotalFrames() } = {}
+  ) {
+    if (wantStart == null || !totalFrames) return null;
+    let all = listTimelineStepsWithFrames(totalFrames);
+    if (incomplete) {
+      all = all.filter((s) => s.incomplete || isIncompleteStepLabel(s.label));
+    } else if (stepNum != null) {
+      all = all.filter((s) => s.stepNum === stepNum && !s.incomplete);
+    }
+    if (!all.length) return null;
+    const tol = Math.max(BOUND_EPS, 2);
+    const hits = all.filter((r) => Math.abs(r.startFrame - wantStart) <= tol);
+    if (hits.length) {
+      hits.sort(
+        (a, b) =>
+          Math.abs(a.startFrame - wantStart) - Math.abs(b.startFrame - wantStart) ||
+          b.width - a.width
+      );
+      return hits[0];
+    }
+    const inTail = all.filter((r) => r.startFrame >= wantStart - tol);
+    inTail.sort((a, b) => a.startFrame - b.startFrame);
+    return inTail[0] || null;
+  }
+
+  function stepSelectionRoots() {
+    return [
+      document.querySelector('[data-testid="object-left-panel"]'),
+      document.querySelector('[data-testid="editor-sider"]'),
+      document.querySelector('[data-testid="editor-sider-ontology-list"]')?.parentElement,
+      document.querySelector('[data-testid="editor-sider-top-pane"]'),
+    ].filter(Boolean);
+  }
+
+  /**
+   * Pass / Fail / Incomplete — allow glued hotkey suffix (PassY, FailU, IncompleteI).
+   */
+  function stepOutcomeChoiceKey(raw) {
+    const t = normalizeLabel(raw).replace(/\s+/g, "");
+    const m = t.match(/^(pass|fail|incomplete)([yui])?$/i);
+    return m ? m[1].toLowerCase() : null;
+  }
+
+  function isStepOutcomeChoiceLabel(raw) {
+    return !!stepOutcomeChoiceKey(raw);
+  }
+
+  function isRadioChecked(el) {
+    if (!el) return false;
+    const input =
+      (el.matches?.('input[type="radio"]') && el) ||
+      el.querySelector?.('input[type="radio"]') ||
+      null;
+    if (input?.checked) return true;
+    const wrap = el.closest?.("label.ant-radio-wrapper, label, [role='radio']") || el;
+    if (wrap.classList?.contains("ant-radio-wrapper-checked")) return true;
+    if (wrap.querySelector?.(".ant-radio-checked, [aria-checked='true']")) return true;
+    if (wrap.getAttribute?.("aria-checked") === "true") return true;
+    return false;
+  }
+
+  /**
+   * Step Outcome radios: Pass / Fail / Incomplete (not Step identity, not Grade).
+   * Distinguishes from Grade's incomplete by requiring Pass or Fail in the same group.
+   */
+  function scrapeStepOutcomeOptions(root) {
+    if (!root) return [];
+
+    // Prefer the section under an explicit "Step Outcome" heading
+    const heading = [...root.querySelectorAll("div, span, label, p, h1, h2, h3, h4")].find((el) => {
+      if (isInTimelineChrome(el) || isInLabelsPane(el)) return false;
+      const t = normalizeLabel(el.textContent);
+      return t.length > 0 && t.length < 40 && /^step\s*outcome$/i.test(t);
+    });
+    if (heading) {
+      let section = heading.parentElement;
+      for (let i = 0; i < 5 && section; i += 1) {
+        const labels = [...section.querySelectorAll("label.ant-radio-wrapper, label, [role='radio']")]
+          .filter((el) => {
+            if (isInTimelineChrome(el) || isInLabelsPane(el)) return false;
+            const t = normalizeLabel(el.textContent);
+            return t.length > 0 && t.length < 28 && isStepOutcomeChoiceLabel(t);
+          })
+          .map((el, order) => ({
+            label: stepOutcomeChoiceKey(el.textContent),
+            el,
+            order,
+          }));
+        const names = new Set(labels.map((o) => o.label));
+        if (names.has("incomplete") && (names.has("pass") || names.has("fail"))) {
+          const dedup = [];
+          const seen = new Set();
+          for (const o of labels) {
+            if (seen.has(o.label)) continue;
+            seen.add(o.label);
+            dedup.push(o);
+          }
+          return dedup;
+        }
+        section = section.parentElement;
+      }
+    }
+
+    const labels = [...root.querySelectorAll("label.ant-radio-wrapper, label, [role='radio']")].filter(
+      (el) => {
+        if (isInTimelineChrome(el) || isInLabelsPane(el)) return false;
+        const t = normalizeLabel(el.textContent);
+        return t.length > 0 && t.length < 28 && isStepOutcomeChoiceLabel(t);
+      }
+    );
+    if (!labels.length) return [];
+
+    const groups = new Map();
+    for (const el of labels) {
+      const parent =
+        el.closest('[role="radiogroup"], .ant-radio-group, [class*="Radio"]') ||
+        el.closest('[data-testid]') ||
+        el.parentElement?.parentElement ||
+        el.parentElement;
+      const key = parent || el;
+      if (!groups.has(key)) groups.set(key, []);
+      const keyLabel = stepOutcomeChoiceKey(el.textContent);
+      if (!keyLabel || groups.get(key).some((o) => o.label === keyLabel)) continue;
+      groups.get(key).push({ label: keyLabel, el, order: groups.get(key).length });
+    }
+
+    // Prefer a group that looks like Step Outcome (has Incomplete + Pass or Fail)
+    let best = null;
+    for (const opts of groups.values()) {
+      const names = new Set(opts.map((o) => o.label));
+      if (!names.has("incomplete")) continue;
+      if (!names.has("pass") && !names.has("fail")) continue;
+      if (!best || opts.length > best.length) best = opts;
+    }
+    return best || [];
+  }
+
+  function findStepOutcomeIncompleteChecked() {
+    for (const root of stepSelectionRoots()) {
+      const opts = scrapeStepOutcomeOptions(root);
+      const hit = opts.find((o) => o.label === "incomplete");
+      if (hit && isRadioChecked(hit.el)) return { ok: true, hit, options: opts.map((o) => o.label) };
+    }
+    return { ok: false };
+  }
+
+  /** Step identity = first entry in ordered Step options (Step 1). */
+  function selectFirstStepIdentityOption() {
+    for (const root of stepSelectionRoots()) {
+      const opts = scrapeOrderedStepOptions(root);
+      if (!opts.length) continue;
+      const first = firstDefinedFromSteps(opts);
+      if (!first?.el) continue;
+      if (isRadioChecked(first.el)) {
+        return {
+          ok: true,
+          via: "already-checked",
+          stepNum: first.stepNum,
+          label: first.label,
+        };
+      }
+      if (forceClickRadioEl(first.el)) {
+        return {
+          ok: true,
+          via: "step-identity-radio",
+          stepNum: first.stepNum,
+          label: first.label,
+        };
+      }
+    }
+    return { ok: false, error: "first-step-not-found" };
+  }
+
+  /**
+   * S2 attribute = Step Outcome → Incomplete.
+   * Never use hotkey I — that is also Grade Incomplete and would mark G2.
+   */
+  function selectIncompleteStepOption() {
+    for (const root of stepSelectionRoots()) {
+      const opts = scrapeStepOutcomeOptions(root);
+      if (!opts.length) continue;
+      const hit = opts.find((o) => o.label === "incomplete");
+      if (!hit) continue;
+      if (forceClickRadioEl(hit.el)) {
+        return {
+          ok: true,
+          via: "step-outcome-radio",
+          label: "incomplete",
+          incomplete: true,
+          options: opts.map((o) => o.label),
+        };
+      }
+    }
+    // Do NOT press "i" — Grade Incomplete shares that hotkey and would set G2.
+    return { ok: false, error: "step-outcome-incomplete-not-found" };
+  }
+
+  /**
+   * S2 value: Step 1 (first identity) + Step Outcome Incomplete, then Done/Esc.
+   * Call only with the S2 Step instance selected — never while Grade is focused.
+   */
+  async function applyIncompleteStepToRange(range) {
+    if (!range?.el) return { ok: false, error: "no-range" };
+    try {
+      range.el.click();
+    } catch {
+      return { ok: false, error: "click-failed" };
+    }
+    await sleep(W.panel);
+
+    let lastStepId = { ok: false };
+    let lastOutcome = { ok: false };
+    for (let i = 0; i < 3; i += 1) {
+      try {
+        range.el.click();
+      } catch {
+        /* ignore */
+      }
+      await sleep(W.med);
+      const instance = normalizeLabel(
+        document.querySelector('[data-testid="instance-name"]')?.textContent || ""
+      ).toLowerCase();
+      if (instance !== "step") {
+        try {
+          range.el.click();
+        } catch {
+          /* ignore */
+        }
+        await sleep(W.panel);
+      }
+
+      lastStepId = selectFirstStepIdentityOption();
+      await sleep(W.med);
+      lastOutcome = selectIncompleteStepOption();
+      await sleep(W.panel);
+      const checked = findStepOutcomeIncompleteChecked();
+      if (checked.ok && lastStepId.ok) {
+        await blurRangeFrameInputs();
+        await sleep(W.short);
+        const done = clickDoneIfPresent();
+        if (!done) pressEditorKey("Escape");
+        await sleep(W.med);
+        return {
+          ok: true,
+          via: lastOutcome.via || "step-outcome-radio",
+          label: "incomplete",
+          stepIdentity: lastStepId,
+          selected: lastOutcome,
+          checked,
+          done: !!done,
+        };
+      }
+      await sleep(W.short);
+    }
+    return {
+      ok: false,
+      error: "step-outcome-incomplete-not-applied",
+      stepIdentity: lastStepId,
+      selected: lastOutcome,
+      label: rangeLabel(range.el),
+    };
+  }
+
+  /** After full sync: select existing G1 only — never arm Trajectory create. */
+  async function selectGradeForOperator(_tailStart) {
+    const grade = findPrimaryGradeRange();
+    if (!grade?.el) {
+      return { ok: false, skipped: true, reason: "no-g1" };
+    }
+    try {
+      grade.el.click();
+    } catch {
+      return { ok: false, error: "g1-click-failed" };
+    }
+    await sleep(W.med);
+    return { ok: true, grade, via: "g1-click" };
   }
 
   function activateStepClass() {
@@ -572,13 +1109,13 @@
       return { ok: false, error: "extend-resolved-to-primary" };
     }
 
-    for (let attempt = 0; attempt < 5; attempt += 1) {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
       try {
         active.el.click();
       } catch {
         return { ok: false, error: "click-failed" };
       }
-      await sleep(160);
+      await sleep(W.panel);
       const geo = timelineBounds(active);
       if (!geo) return { ok: false, error: "no-geo" };
       if (Math.abs(geo.endFrame - targetEnd) <= BOUND_EPS) {
@@ -593,52 +1130,52 @@
       }
       if (geo.endFrame > targetEnd) {
         adjustRightSide(targetEnd - geo.endFrame);
-        await sleep(120);
+        await sleep(W.med);
       } else {
         const shortBy = Math.max(1, Math.min(4, targetEnd - geo.endFrame));
         adjustRightSide(shortBy);
-        await sleep(120);
+        await sleep(W.med);
       }
       const bounds = findRangeBoundInputs();
       if (bounds) {
         // Keep start; only rewrite end so we don't disturb G1 abutment.
         await setInputFrame(bounds.end, targetEnd);
-        await sleep(140);
+        await sleep(W.panel);
       }
       // Fill to playhead at target end as a last push for episode-end shorts
       if (attempt >= 1) {
         const jumped = await goToFrame(targetEnd);
-        await sleep(60);
+        await sleep(W.short);
         try {
           active.el.click();
         } catch {
           /* ignore */
         }
-        await sleep(100);
+        await sleep(W.med);
         if (jumped.ok) {
           clickFillToPlayhead();
-          await sleep(220);
+          await sleep(W.settle);
         } else if (total && targetEnd >= total - 1) {
           // Jump to last navigable frame then nudge end past it via inputs/adjust
           await goToFrame(Math.max(0, total - 1));
-          await sleep(60);
+          await sleep(W.short);
           try {
             active.el.click();
           } catch {
             /* ignore */
           }
-          await sleep(80);
+          await sleep(W.short);
           clickFillToPlayhead();
-          await sleep(200);
+          await sleep(W.settle);
           adjustRightSide(1);
-          await sleep(100);
+          await sleep(W.med);
         }
         const bounds2 = findRangeBoundInputs();
         if (bounds2) {
           const startKeep = Number(String(bounds2.start.value || "").replace(/[^\d]/g, ""));
           if (Number.isFinite(startKeep)) await setInputFrame(bounds2.start, startKeep);
           await setInputFrame(bounds2.end, targetEnd);
-          await sleep(140);
+          await sleep(W.panel);
         }
       }
       active =
@@ -726,17 +1263,21 @@
           { source: "encord-grade-sync", type: "GOTO_FRAME", id, frame },
           "*"
         );
-      }, 50);
+      }, 20);
     });
   }
 
   async function goToFrame(frame) {
     const target = Math.max(0, Math.floor(frame));
+    const already = getCurrentFrame();
+    if (already != null && Math.abs(already - target) <= FRAME_EPS) {
+      return { ok: true, frame: already, via: "already" };
+    }
 
     // 1) MAIN-world React path
     let result = await pageGotoFrame(target);
-    for (let i = 0; i < 15; i += 1) {
-      await sleep(40);
+    for (let i = 0; i < 10; i += 1) {
+      await sleep(W.tick);
       const cur = getCurrentFrame();
       if (cur != null && Math.abs(cur - target) <= FRAME_EPS) {
         return { ok: true, frame: cur, via: "page-world" };
@@ -747,15 +1288,15 @@
     const input = document.querySelector('[data-testid="content-navigation-frame-input"]');
     if (input) {
       input.focus();
-      await sleep(20);
+      await sleep(W.tick);
       input.select?.();
       setNativeInputValue(input, String(target));
       input.dispatchEvent(
         new KeyboardEvent("keydown", { key: "Enter", code: "Enter", keyCode: 13, bubbles: true })
       );
       input.blur();
-      for (let i = 0; i < 15; i += 1) {
-        await sleep(40);
+      for (let i = 0; i < 10; i += 1) {
+        await sleep(W.tick);
         const cur = getCurrentFrame();
         if (cur != null && Math.abs(cur - target) <= FRAME_EPS) {
           return { ok: true, frame: cur, via: "dom-input" };
@@ -774,8 +1315,8 @@
       el.dispatchEvent(
         new MouseEvent("click", { bubbles: true, cancelable: true, clientX: x, clientY: y, view: window })
       );
-      for (let i = 0; i < 15; i += 1) {
-        await sleep(40);
+      for (let i = 0; i < 10; i += 1) {
+        await sleep(W.tick);
         const cur = getCurrentFrame();
         if (cur != null && Math.abs(cur - target) <= Math.max(FRAME_EPS, 2)) {
           return { ok: true, frame: cur, via: "slider" };
@@ -1025,7 +1566,7 @@
       shell.querySelector?.('[data-testid="canvas"]') ||
       shell;
     clickEl(target);
-    await sleep(40);
+    await sleep(W.short);
     clickEl(target);
     return shell;
   }
@@ -1037,13 +1578,13 @@
    */
   async function clearInstanceSelection() {
     const shell = await focusPreferredGradeTile();
-    await sleep(40);
+    await sleep(W.short);
 
     const modeTag =
       shell?.querySelector?.('[data-testid="editor-mode-status-tag"]') ||
       document.querySelector('[data-testid="editor-mode-status-tag"]');
     clickEl(modeTag);
-    await sleep(40);
+    await sleep(W.short);
 
     const canvas =
       shell?.querySelector?.('[data-testid="canvas"]') ||
@@ -1067,9 +1608,9 @@
         new MouseEvent("click", { bubbles: true, clientX: x, clientY: y, view: window })
       );
     }
-    await sleep(60);
+    await sleep(W.short);
     pressEditorKey("Escape");
-    await sleep(40);
+    await sleep(W.short);
   }
 
   function activateTrajectoryClass() {
@@ -1090,6 +1631,172 @@
       return "aria";
     }
     return null;
+  }
+
+  /**
+   * Grade value radios under Trajectory → Grade (DOM order), e.g.
+   * -1, 0, 1, 3, 4, 5, complete, incomplete.
+   */
+  function scrapeOrderedGradeValueOptions(root) {
+    if (!root) return [];
+    const ordered = [];
+    const seen = new Set();
+
+    const push = (raw, el) => {
+      if (!el || isInTimelineChrome(el) || isInLabelsPane(el)) return;
+      const t = normalizeLabel(raw);
+      if (!t || t.length > 24) return;
+      if (/^grade$/i.test(t) || /^step\b/i.test(t) || /^trajectory$/i.test(t)) return;
+      if (!/^-?\d+$/.test(t) && !/^(complete|incomplete)$/i.test(t)) return;
+      const key = t.toLowerCase();
+      if (seen.has(key)) return;
+      seen.add(key);
+      ordered.push({ label: t, el, order: ordered.length });
+    };
+
+    const treeItems = [...root.querySelectorAll('[role="treeitem"]')].filter((el) => {
+      const style = el.getAttribute("style") || "";
+      if (/display:\s*none/i.test(style)) return false;
+      return !!el.querySelector("label.ant-radio-wrapper, label, .ant-radio");
+    });
+    for (const item of treeItems) {
+      const title =
+        item.querySelector(".ant-tree-title") ||
+        item.querySelector("label.ant-radio-wrapper") ||
+        item.querySelector("label");
+      push(title?.textContent || item.textContent || "", item);
+    }
+
+    if (ordered.length < 2) {
+      for (const el of root.querySelectorAll("label.ant-radio-wrapper, .ant-tree label")) {
+        push(el.textContent || "", el);
+      }
+    }
+
+    return ordered;
+  }
+
+  function gradeValueRoots() {
+    return [
+      document.querySelector('[data-testid="object-left-panel"]'),
+      document.querySelector('[data-testid="editor-sider"]'),
+      document.querySelector('[data-testid="editor-sider-ontology-list"]')?.parentElement,
+    ].filter(Boolean);
+  }
+
+  function findGradeValueChecked(wantLabel) {
+    const re = new RegExp(`^${wantLabel}$`, "i");
+    for (const root of gradeValueRoots()) {
+      const opts = scrapeOrderedGradeValueOptions(root);
+      const hit = opts.find((o) => re.test(o.label));
+      if (hit && isRadioChecked(hit.el)) {
+        return { ok: true, hit, options: opts.map((o) => o.label) };
+      }
+    }
+    return { ok: false };
+  }
+
+  /** Click a radio/label even when ant-tree marks nodes disabled. */
+  function forceClickRadioEl(el) {
+    if (!el) return false;
+    const label = el.closest?.("label") || (el.matches?.("label") ? el : null) || el;
+    const input =
+      (el.matches?.('input[type="radio"]') && el) ||
+      el.querySelector?.('input[type="radio"]') ||
+      label?.querySelector?.('input[type="radio"]') ||
+      null;
+    try {
+      if (input) {
+        input.disabled = false;
+        input.removeAttribute?.("disabled");
+        input.click();
+      }
+    } catch {
+      /* ignore */
+    }
+    try {
+      label.click();
+    } catch {
+      /* ignore */
+    }
+    try {
+      const rect = (label || el).getBoundingClientRect();
+      const x = rect.left + Math.min(12, Math.max(4, rect.width / 2));
+      const y = rect.top + rect.height / 2;
+      for (const type of ["pointerdown", "mousedown", "mouseup", "click"]) {
+        (label || el).dispatchEvent(
+          new MouseEvent(type, { bubbles: true, cancelable: true, clientX: x, clientY: y, view: window })
+        );
+      }
+    } catch {
+      /* ignore */
+    }
+    return true;
+  }
+
+  /**
+   * G2 Grade value = Incomplete (last option: -1…5, incomplete).
+   * G1 deliberately leaves Grade unselected. Never use hotkey I during S2.
+   */
+  function selectIncompleteGradeOption() {
+    for (const root of gradeValueRoots()) {
+      const opts = scrapeOrderedGradeValueOptions(root);
+      if (!opts.length) continue;
+      // Prefer Incomplete in a Grade list (has numeric options) — not Step Outcome
+      const hasNumeric = opts.some((o) => /^-?\d+$/.test(o.label));
+      const hit = opts.find((o) => /^incomplete$/i.test(o.label));
+      if (!hit) continue;
+      if (!hasNumeric && opts.length <= 2) continue;
+      if (forceClickRadioEl(hit.el)) {
+        return {
+          ok: true,
+          via: "grade-incomplete-radio",
+          label: "incomplete",
+          options: opts.map((o) => o.label),
+        };
+      }
+    }
+    return { ok: false, error: "grade-incomplete-not-found", options: null };
+  }
+
+  /**
+   * G2 only: with Trajectory/G2 selected, set Grade Incomplete via hotkey I,
+   * then Done / Escape to commit. Call only after G2 bounds are final.
+   */
+  async function applyIncompleteGradeToRange(range) {
+    if (!range?.el) return { ok: false, error: "no-range" };
+    try {
+      range.el.click();
+    } catch {
+      return { ok: false, error: "click-failed" };
+    }
+    await sleep(W.panel);
+    await blurRangeFrameInputs();
+    await sleep(W.short);
+
+    // Prefer visible Incomplete radio; fall back to hotkey I (Grade panel only)
+    let via = "hotkey-i";
+    const radio = selectIncompleteGradeOption();
+    if (radio.ok) {
+      via = radio.via || "radio";
+    } else {
+      pressEditorKey("i");
+    }
+    await sleep(W.panel);
+
+    const checked = findGradeValueChecked("incomplete");
+    const done = clickDoneIfPresent();
+    if (!done) pressEditorKey("Escape");
+    await sleep(W.med);
+
+    return {
+      ok: checked.ok || radio.ok || via === "hotkey-i",
+      via,
+      label: "incomplete",
+      checked,
+      radio,
+      done: !!done,
+    };
   }
 
   /** Find editable Range start / Range end inputs (instance edit panel). */
@@ -1132,7 +1839,7 @@
     // Prefer MAIN-world React onChange so Encord state commits (DOM-only value can lie).
     if (aria) {
       const page = await pageSetRangeInput(aria, Number(val));
-      await sleep(100);
+      await sleep(W.short);
       const live = document.querySelector(`input[aria-label="${aria}"]`) || input;
       if (String(live.value || "").replace(/[^\d]/g, "") === val) {
         // Commit: Enter + blur (Ant often applies onPressEnter / onBlur)
@@ -1160,13 +1867,13 @@
         } catch {
           /* ignore */
         }
-        await sleep(80);
+        await sleep(W.short);
         return { ok: true, via: "react", page };
       }
     }
 
     input.focus();
-    await sleep(30);
+    await sleep(W.tick);
     try {
       input.select();
     } catch {
@@ -1226,7 +1933,7 @@
           { source: "encord-grade-sync", type: "SET_RANGE_INPUT", id, ariaLabel, frame },
           "*"
         );
-      }, 40);
+      }, 20);
     });
   }
 
@@ -1359,6 +2066,409 @@
   }
 
   /**
+   * Lean resize when the instance already has a real span (not a pin).
+   * Click → write Range inputs once → small Adjust nudge if off by ≤2.
+   * Does not Fill. Caller falls back to resizeViaRangeInputs when this fails.
+   */
+  async function setRangeFast(range, startFrame, endFrame, opts = {}) {
+    const total = getTotalFrames();
+    let wantStart = Math.max(0, Math.floor(startFrame));
+    let wantEnd = Math.max(wantStart, Math.floor(endFrame));
+    if (total) {
+      wantEnd = Math.min(wantEnd, total);
+      wantStart = Math.min(wantStart, wantEnd);
+    }
+    if (!range?.el) return { ok: false, error: "no-range", via: "fast" };
+
+    const lockTail = opts.lockToSelectRange === true || (opts.matchStart != null && opts.matchStart > 1);
+
+    function refresh() {
+      if (opts.refresh) return opts.refresh();
+      if (lockTail && range.el?.isConnected) {
+        const live = describeRange(range.el);
+        return live ? withGradeFrames(live, total) : withGradeFrames(range, total);
+      }
+      if (wantStart <= 1) return findPrimaryGradeRange();
+      return (
+        findGradeNearStart(opts.matchStart ?? wantStart, total) ||
+        (range.el?.isConnected
+          ? withGradeFrames(describeRange(range.el) || range, total)
+          : null)
+      );
+    }
+
+    try {
+      range.el.click();
+    } catch {
+      return { ok: false, error: "click-failed", via: "fast" };
+    }
+    await sleep(W.med);
+
+    let active = refresh() || withGradeFrames(describeRange(range.el) || range, total);
+    let geo = timelineBounds(active);
+    if (!geo || geo.span <= 2) {
+      return { ok: false, error: "needs-expand", via: "fast", geo, range: active };
+    }
+
+    if (timelineMatches(wantStart, wantEnd, active)) {
+      await blurRangeFrameInputs();
+      return {
+        ok: true,
+        via: "fast-already",
+        after: geo,
+        want: { startFrame: wantStart, endFrame: wantEnd },
+        range: active,
+      };
+    }
+
+    let bounds = findRangeBoundInputs();
+    if (!bounds) {
+      try {
+        range.el.click();
+      } catch {
+        /* ignore */
+      }
+      await sleep(W.med);
+      bounds = findRangeBoundInputs();
+    }
+    if (!bounds) return { ok: false, error: "no-range-inputs", via: "fast", geo };
+
+    const readVals = () => ({
+      startVal: Number(String(bounds.start.value || "").replace(/[^\d]/g, "")),
+      endVal: Number(String(bounds.end.value || "").replace(/[^\d]/g, "")),
+    });
+    let cur = readVals();
+    if (cur.startVal !== wantStart || cur.endVal !== wantEnd) {
+      await setInputFrame(bounds.start, wantStart);
+      await sleep(W.short);
+      bounds = findRangeBoundInputs() || bounds;
+      await setInputFrame(bounds.end, wantEnd);
+      await sleep(W.panel);
+    }
+
+    await blurRangeFrameInputs();
+    await sleep(W.short);
+    active = refresh() || active;
+    geo = timelineBounds(active);
+
+    // Small nudge only — keep lean path short
+    if (geo && !timelineMatches(wantStart, wantEnd, active)) {
+      const startDelta = wantStart - geo.startFrame;
+      const endDelta = wantEnd - geo.endFrame;
+      if (Math.abs(startDelta) > 0 && Math.abs(startDelta) <= 2) {
+        adjustLeftSide(startDelta);
+        await sleep(W.short);
+      }
+      if (Math.abs(endDelta) > 0 && Math.abs(endDelta) <= 2) {
+        adjustRightSide(endDelta);
+        await sleep(W.short);
+      }
+      bounds = findRangeBoundInputs();
+      if (bounds && !timelineMatches(wantStart, wantEnd, active)) {
+        await setInputFrame(bounds.start, wantStart);
+        await sleep(W.tick);
+        bounds = findRangeBoundInputs() || bounds;
+        await setInputFrame(bounds.end, wantEnd);
+        await sleep(W.med);
+      }
+      await blurRangeFrameInputs();
+      await sleep(W.short);
+      active = refresh() || active;
+      geo = timelineBounds(active);
+    }
+
+    const ok = timelineMatches(wantStart, wantEnd, active);
+    return {
+      ok,
+      via: ok ? "fast" : "fast-mismatch",
+      after: geo,
+      want: { startFrame: wantStart, endFrame: wantEnd },
+      range: active,
+      error: ok ? undefined : "fast-timeline-mismatch",
+    };
+  }
+
+  /**
+   * Prefer setRangeFast when the bar already has a real span.
+   * expandPinToRange only for pins (span≤2) — never re-Fill an existing bar
+   * (that was stacking fast-fail + expand + full ≈ 2s on G1).
+   */
+  async function resizeRangeSmart(startFrame, endFrame, opts = {}) {
+    const total = getTotalFrames();
+    const matchStart = opts.matchStart != null ? opts.matchStart : startFrame;
+    const lockTail = opts.lockToSelectRange === true || matchStart > 1;
+
+    let candidate = opts.selectRange || null;
+    if (!candidate?.el) {
+      candidate =
+        matchStart <= 1
+          ? findPrimaryGradeRange()
+          : findGradeNearStart(matchStart, total);
+    } else if (candidate.el) {
+      const live = describeRange(candidate.el);
+      candidate = live ? withGradeFrames(live, total) : withGradeFrames(candidate, total);
+    }
+
+    const geo = candidate ? timelineBounds(candidate) : null;
+
+    // Existing real bar: lean only, then full — never expandPin
+    if (geo && geo.span > 2) {
+      if (!(lockTail && geo.startFrame <= 1 && matchStart > 2)) {
+        const fast = await setRangeFast(candidate, startFrame, endFrame, opts);
+        if (fast.ok) return { ...fast, path: "fast" };
+      }
+      const full = await resizeViaRangeInputs(startFrame, endFrame, opts);
+      return { ...full, path: full.via || "full-after-fast" };
+    }
+
+    // Pin / tiny span: expand once, then full only if needed
+    if (candidate?.el) {
+      const expanded = await expandPinToRange(candidate, startFrame, endFrame, opts);
+      if (expanded.ok) return { ...expanded, path: expanded.via || "expand" };
+    }
+
+    const full = await resizeViaRangeInputs(startFrame, endFrame, opts);
+    return { ...full, path: full.via || "full" };
+  }
+
+  /** Click range, jump, Fill-to-playhead — used to grow pins into real spans. */
+  async function fillRangeToFrame(range, frame, opts = {}) {
+    if (!range?.el) return { ok: false };
+    const before = timelineBounds(range);
+    const jumped = await goToFrame(frame);
+    await sleep(W.tick);
+    try {
+      range.el.click();
+    } catch {
+      /* ignore */
+    }
+    await sleep(W.short);
+    if (jumped.ok) clickFillToPlayhead();
+    // Poll for geometry change instead of fixed settle
+    await waitUntil(() => {
+      const live = range.el ? describeRange(range.el) : null;
+      const geo = live ? timelineBounds(withGradeFrames(live, getTotalFrames()) || range) : null;
+      if (!geo) return false;
+      if (opts.wantSpan && geo.span > 2) return true;
+      if (opts.wantEnd != null && geo.endFrame >= opts.wantEnd) return true;
+      if (opts.wantStart != null && Math.abs(geo.startFrame - opts.wantStart) <= 1) return true;
+      if (before && (geo.span !== before.span || geo.startFrame !== before.startFrame || geo.endFrame !== before.endFrame)) {
+        return true;
+      }
+      return false;
+    }, { timeout: W.settle + 80, interval: W.tick });
+    return { ok: jumped.ok, jumped: jumped.ok };
+  }
+
+  /**
+   * Grow a pin/short bar to [start,end], then commit exact bounds.
+   * Success always requires timelineMatches (BOUND_EPS) — never “close enough”.
+   * Pin at start → Fill at end; otherwise Fill at start then end; then exact inputs.
+   */
+  async function expandPinToRange(range, startFrame, endFrame, opts = {}) {
+    const total = getTotalFrames();
+    let wantStart = Math.max(0, Math.floor(startFrame));
+    let wantEnd = Math.max(wantStart, Math.floor(endFrame));
+    if (total) {
+      wantEnd = Math.min(wantEnd, total);
+      wantStart = Math.min(wantStart, wantEnd);
+    }
+    if (!range?.el) return { ok: false, error: "no-range", via: "expand-pin" };
+
+    const lockTail = opts.lockToSelectRange === true || (opts.matchStart != null && opts.matchStart > 1);
+
+    function refresh() {
+      if (opts.refresh) return opts.refresh();
+      if (lockTail && range.el?.isConnected) {
+        const live = describeRange(range.el);
+        return live ? withGradeFrames(live, total) : withGradeFrames(range, total);
+      }
+      if (wantStart <= 1) return findPrimaryGradeRange();
+      return (
+        findGradeNearStart(opts.matchStart ?? wantStart, total) ||
+        (range.el?.isConnected
+          ? withGradeFrames(describeRange(range.el) || range, total)
+          : null)
+      );
+    }
+
+    try {
+      range.el.click();
+    } catch {
+      return { ok: false, error: "click-failed", via: "expand-pin" };
+    }
+    await sleep(W.short);
+
+    let active = refresh() || withGradeFrames(describeRange(range.el) || range, total);
+    let geo = timelineBounds(active);
+    const pinAtStart =
+      geo && geo.span <= 2 && Math.abs((geo.startFrame ?? -1) - wantStart) <= 1;
+
+    if (pinAtStart) {
+      await fillRangeToFrame(active || range, wantEnd, { wantEnd, wantSpan: true });
+      active = refresh() || active;
+      geo = timelineBounds(active);
+    } else {
+      // Critical: Fill at wantStart first (G2 pin lives at episode end — Fill-at-end is a no-op)
+      if (!geo || geo.span <= 2 || Math.abs((geo.startFrame ?? -1) - wantStart) > BOUND_EPS) {
+        await fillRangeToFrame(active || range, wantStart, { wantStart, wantSpan: true });
+        active = refresh() || active;
+        geo = timelineBounds(active);
+      }
+      if (!geo || (geo.endFrame ?? -1) < wantEnd) {
+        await fillRangeToFrame(active || range, wantEnd, { wantEnd });
+        active = refresh() || active;
+        geo = timelineBounds(active);
+      }
+      if (!geo || geo.span <= 2) {
+        await fillRangeToFrame(active || range, wantEnd, { wantSpan: true, wantEnd });
+        active = refresh() || active;
+        geo = timelineBounds(active);
+      }
+    }
+
+    if (timelineMatches(wantStart, wantEnd, active)) {
+      await blurRangeFrameInputs();
+      return { ok: true, via: "expand+fill", after: geo, range: active };
+    }
+
+    // Exact commit via Range inputs (+ Adjust only to reach exact match)
+    if (active?.el) {
+      try {
+        active.el.click();
+      } catch {
+        /* ignore */
+      }
+      await sleep(W.short);
+      let bounds = findRangeBoundInputs();
+      if (!bounds) {
+        await waitUntil(() => !!findRangeBoundInputs(), { timeout: 200, interval: W.tick });
+        bounds = findRangeBoundInputs();
+      }
+      if (bounds) {
+        await setInputFrame(bounds.start, wantStart);
+        await sleep(W.tick);
+        bounds = findRangeBoundInputs() || bounds;
+        await setInputFrame(bounds.end, wantEnd);
+        await sleep(W.short);
+      }
+      active = refresh() || active;
+      geo = timelineBounds(active);
+      if (geo && !timelineMatches(wantStart, wantEnd, active)) {
+        const startDelta = wantStart - geo.startFrame;
+        const endDelta = wantEnd - geo.endFrame;
+        if (Math.abs(startDelta) > 0 && Math.abs(startDelta) <= 40) {
+          adjustLeftSide(startDelta);
+          await sleep(W.short);
+        }
+        if (Math.abs(endDelta) > 0 && Math.abs(endDelta) <= 40) {
+          adjustRightSide(endDelta);
+          await sleep(W.short);
+        }
+        bounds = findRangeBoundInputs();
+        if (bounds) {
+          await setInputFrame(bounds.start, wantStart);
+          await sleep(W.tick);
+          bounds = findRangeBoundInputs() || bounds;
+          await setInputFrame(bounds.end, wantEnd);
+          await sleep(W.short);
+        }
+      }
+      await blurRangeFrameInputs();
+      await sleep(W.tick);
+      active = refresh() || active;
+      if (timelineMatches(wantStart, wantEnd, active)) {
+        return {
+          ok: true,
+          via: "expand+medium",
+          after: timelineBounds(active),
+          range: active,
+        };
+      }
+    }
+
+    return {
+      ok: false,
+      error: "expand-pin-mismatch",
+      via: "expand-pin",
+      after: timelineBounds(active),
+      range: active,
+    };
+  }
+
+  /**
+   * Exact G1 restore when start is already 0 and end is short by 1–2 frames.
+   * Only writes/adjusts the end; succeeds only if timelineMatches(0, wantEnd).
+   */
+  async function quickRestorePrimaryEnd(wantEnd) {
+    const want = Math.max(0, Math.floor(wantEnd));
+    const primary = findPrimaryGradeRange();
+    if (!primary?.el) return { ok: false, error: "no-primary" };
+    const geo0 = timelineBounds(primary);
+    if (!geo0) return { ok: false, error: "no-geo" };
+    const startOk = Math.abs((geo0.startFrame ?? -1) - 0) <= BOUND_EPS;
+    const shortBy = want - (geo0.endFrame ?? -1);
+    if (!startOk || shortBy < 1 || shortBy > 2) {
+      return { ok: false, error: "not-quick-candidate", geo: geo0, shortBy };
+    }
+
+    try {
+      primary.el.click();
+    } catch {
+      return { ok: false, error: "click-failed" };
+    }
+    await sleep(W.short);
+    await waitUntil(() => !!findRangeBoundInputs(), { timeout: 200, interval: W.tick });
+
+    adjustRightSide(shortBy);
+    await sleep(W.short);
+    let bounds = findRangeBoundInputs();
+    if (bounds) {
+      await setInputFrame(bounds.end, want);
+      await sleep(W.short);
+    }
+    await blurRangeFrameInputs();
+    await sleep(W.tick);
+
+    const primary1 = findPrimaryGradeRange() || primary;
+    if (timelineMatches(0, want, primary1)) {
+      return { ok: true, via: "quick-end-exact", after: timelineBounds(primary1), shortBy };
+    }
+
+    // One more exact end write
+    try {
+      primary1.el.click();
+    } catch {
+      /* ignore */
+    }
+    await sleep(W.short);
+    bounds = findRangeBoundInputs();
+    if (bounds) {
+      await setInputFrame(bounds.end, want);
+      await sleep(W.short);
+    }
+    adjustRightSide(1);
+    await sleep(W.short);
+    bounds = findRangeBoundInputs();
+    if (bounds) {
+      await setInputFrame(bounds.end, want);
+      await sleep(W.short);
+    }
+    await blurRangeFrameInputs();
+    await sleep(W.tick);
+
+    const primary2 = findPrimaryGradeRange() || primary1;
+    const ok = timelineMatches(0, want, primary2);
+    return {
+      ok,
+      via: ok ? "quick-end-exact" : "quick-end-miss",
+      after: timelineBounds(primary2),
+      shortBy,
+      error: ok ? undefined : "quick-end-not-exact",
+    };
+  }
+
+  /**
    * Commit real timeline geometry. Zero-width pins ignore Range inputs (fields can
    * show 0–810 while the bar stays 827–827). Order:
    * 1) Fill-to-playhead at wantStart and at wantEnd (creates a real span)
@@ -1384,6 +2494,14 @@
     const lockTail = opts.lockToSelectRange === true || matchStart > 1;
 
     function refreshActive() {
+      // Locked resize (G2 / Step tail): stay on the provided instance — never
+      // jump to a Grade that shares the same start frame.
+      if (lockTail && opts.selectRange?.el?.isConnected) {
+        const live = describeRange(opts.selectRange.el);
+        return live
+          ? withGradeFrames(live, getTotalFrames())
+          : withGradeFrames(opts.selectRange, getTotalFrames());
+      }
       const near = findGradeNearStart(matchStart, getTotalFrames());
       if (near) return near;
       if (opts.selectRange?.el?.isConnected) {
@@ -1416,7 +2534,7 @@
       } catch {
         return false;
       }
-      await sleep(200);
+      await sleep(W.med);
       return true;
     }
 
@@ -1427,35 +2545,51 @@
         bounds = findRangeBoundInputs();
       }
       if (!bounds) return { ok: false, error: "no-range-inputs" };
-      await setInputFrame(bounds.start, start);
-      await sleep(80);
-      bounds = findRangeBoundInputs() || bounds;
-      await setInputFrame(bounds.end, end);
-      await sleep(80);
-      bounds = findRangeBoundInputs() || bounds;
-      await setInputFrame(bounds.start, start);
-      await sleep(80);
-      bounds = findRangeBoundInputs() || bounds;
-      await setInputFrame(bounds.end, end);
-      await sleep(120);
-      const startEl = document.querySelector('input[aria-label="Range start"]');
-      const endEl = document.querySelector('input[aria-label="Range end"]');
-      return {
-        ok: true,
-        startVal: Number(String(startEl?.value || "").replace(/[^\d]/g, "")),
-        endVal: Number(String(endEl?.value || "").replace(/[^\d]/g, "")),
+
+      const readVals = () => {
+        const startEl = document.querySelector('input[aria-label="Range start"]');
+        const endEl = document.querySelector('input[aria-label="Range end"]');
+        return {
+          startVal: Number(String(startEl?.value || "").replace(/[^\d]/g, "")),
+          endVal: Number(String(endEl?.value || "").replace(/[^\d]/g, "")),
+        };
       };
+
+      // Skip writes when inputs already match
+      let cur = readVals();
+      if (cur.startVal === start && cur.endVal === end) {
+        return { ok: true, ...cur, skipped: true };
+      }
+
+      await setInputFrame(bounds.start, start);
+      await sleep(W.short);
+      bounds = findRangeBoundInputs() || bounds;
+      await setInputFrame(bounds.end, end);
+      await sleep(W.short);
+      cur = readVals();
+      if (cur.startVal === start && cur.endVal === end) {
+        return { ok: true, ...cur };
+      }
+
+      // Second pass only if first didn't stick
+      bounds = findRangeBoundInputs() || bounds;
+      await setInputFrame(bounds.start, start);
+      await sleep(W.short);
+      bounds = findRangeBoundInputs() || bounds;
+      await setInputFrame(bounds.end, end);
+      await sleep(W.med);
+      return { ok: true, ...readVals() };
     }
 
     async function fillAt(frame) {
       const jumped = await goToFrame(frame);
-      await sleep(70);
+      await sleep(W.short);
       const selected = await selectGrade();
       if (!selected) {
         return { jumped: jumped.ok, via: null, geo: null, error: "fill-no-select" };
       }
       const via = jumped.ok ? clickFillToPlayhead() : null;
-      await sleep(240);
+      await sleep(W.settle);
       active = refreshActive() || active;
       return { jumped: jumped.ok, via, geo: timelineBounds(active) };
     }
@@ -1464,10 +2598,27 @@
       return { ok: false, error: lockTail ? "no-tail-grade" : "no-grade" };
     }
 
-    for (let attempt = 0; attempt < 5; attempt += 1) {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
       await selectGrade();
       active = refreshActive() || active;
       let geo = timelineBounds(active);
+
+      // Already correct — skip fill/write churn
+      if (timelineMatches(wantStart, wantEnd, active)) {
+        await blurRangeFrameInputs();
+        await sleep(W.short);
+        active = refreshActive() || active;
+        if (timelineMatches(wantStart, wantEnd, active)) {
+          return {
+            ok: true,
+            via: "already-matched",
+            after: timelineBounds(active),
+            want: { startFrame: wantStart, endFrame: wantEnd },
+            attempts: attempt + 1,
+            framesBlurred: true,
+          };
+        }
+      }
 
       // 1) Expand pin → real range via Fill (inputs alone do not grow a pin)
       if (!geo || geo.span <= 2 || Math.abs(geo.startFrame - wantStart) > BOUND_EPS) {
@@ -1489,7 +2640,7 @@
 
       // 2) Exact values via Range inputs (works once a real span exists)
       const written = await writeInputs(wantStart, wantEnd);
-      await sleep(150);
+      await sleep(W.panel);
       active = refreshActive() || active;
       geo = timelineBounds(active);
 
@@ -1500,17 +2651,17 @@
         const endDelta = wantEnd - geo.endFrame;
         if (Math.abs(startDelta) > 0 && Math.abs(startDelta) <= 40) {
           adjustLeftSide(startDelta);
-          await sleep(120);
+          await sleep(W.med);
         }
         if (Math.abs(endDelta) > 0 && Math.abs(endDelta) <= 40) {
           adjustRightSide(endDelta);
-          await sleep(120);
+          await sleep(W.med);
         }
         active = refreshActive() || active;
         geo = timelineBounds(active);
         if (!timelineMatches(wantStart, wantEnd, active)) {
           await writeInputs(wantStart, wantEnd);
-          await sleep(120);
+          await sleep(W.med);
         }
       }
 
@@ -1520,9 +2671,9 @@
       if (geo && geo.endFrame > wantEnd && geo.endFrame - wantEnd <= 60) {
         await selectGrade();
         adjustRightSide(wantEnd - geo.endFrame);
-        await sleep(150);
+        await sleep(W.panel);
         await writeInputs(wantStart, wantEnd);
-        await sleep(100);
+        await sleep(W.med);
       }
 
       // 5) Encord often settles one frame short of Range end — extend if short by 1–2
@@ -1533,9 +2684,9 @@
         await selectGrade();
         for (let n = 0; n < shortBy + 1; n += 1) {
           adjustRightSide(1);
-          await sleep(100);
+          await sleep(W.med);
           await writeInputs(wantStart, wantEnd);
-          await sleep(120);
+          await sleep(W.med);
           active = refreshActive() || active;
           geo = timelineBounds(active);
           if (geo && Math.abs(geo.endFrame - wantEnd) <= BOUND_EPS) break;
@@ -1545,18 +2696,18 @@
       active = refreshActive() || active;
       if (timelineMatches(wantStart, wantEnd, active)) {
         await blurRangeFrameInputs();
-        await sleep(160);
+        await sleep(W.med);
         // Re-read after blur — Encord can snap end back by 1 frame on commit
         active = refreshActive() || active;
         geo = timelineBounds(active);
         if (geo && geo.endFrame < wantEnd && wantEnd - geo.endFrame <= 2) {
           await selectGrade();
           adjustRightSide(wantEnd - geo.endFrame);
-          await sleep(120);
+          await sleep(W.med);
           await writeInputs(wantStart, wantEnd);
-          await sleep(120);
+          await sleep(W.med);
           await blurRangeFrameInputs();
-          await sleep(120);
+          await sleep(W.med);
           active = refreshActive() || active;
         }
         if (timelineMatches(wantStart, wantEnd, active)) {
@@ -1601,23 +2752,27 @@
     if (findRangeBoundInputs()) return { ok: true, via: "panel-open" };
 
     const existing = findPrimaryGradeRange();
-    if (existing) {
+    if (existing?.el) {
       try {
         existing.el.click();
       } catch {
         /* ignore */
       }
-      await sleep(220);
-      if (findRangeBoundInputs()) return { ok: true, via: "clicked-pin" };
+      for (let i = 0; i < 12; i += 1) {
+        await sleep(W.tick);
+        if (findRangeBoundInputs()) return { ok: true, via: "clicked-existing" };
+      }
+      // Primary Grade exists — never create another Trajectory (was burning ~800ms + spoiling G1)
+      return { ok: true, via: "existing-no-inputs", created: false };
     }
 
     await clearInstanceSelection();
     // Re-assert preferred tile after deselect — ontology clicks must not land on a wrist cam.
     await focusPreferredGradeTile();
-    await sleep(40);
+    await sleep(W.short);
     const activated = activateTrajectoryClass();
     if (!activated) return { ok: false, error: "no-trajectory-class" };
-    await sleep(180);
+    await sleep(W.panel);
 
     const gradeHit = [...document.querySelectorAll("label, [role='radio'], button, [role='button']")].find(
       (el) => {
@@ -1629,13 +2784,13 @@
     );
     if (gradeHit) gradeHit.click();
     else pressEditorKey("q");
-    await sleep(100);
+    await sleep(W.med);
 
     // Prefer a pin at frame 0 when creating, but Range inputs always overwrite to 0…end.
     // If jump fails, still create a throwaway pin — do NOT use set-start/end-to-current as final.
     const atZero = await goToFrame(0);
     document.activeElement?.blur?.();
-    await sleep(40);
+    await sleep(W.short);
 
     if (atZero.ok) {
       clickControlByText([/this frame\s*&\s*save/i, /^this frame$/i, /this frame/i]);
@@ -1659,7 +2814,10 @@
         );
       }
     }
-    await sleep(400);
+    await waitUntil(() => !!findPrimaryGradeRange() || !!findRangeBoundInputs(), {
+      timeout: W.create,
+      interval: W.tick,
+    });
 
     const pin = findPrimaryGradeRange();
     if (pin) {
@@ -1668,7 +2826,7 @@
       } catch {
         /* ignore */
       }
-      await sleep(220);
+      await waitUntil(() => !!findRangeBoundInputs(), { timeout: W.panel, interval: W.tick });
     }
 
     if (findRangeBoundInputs() || findPrimaryGradeRange()) {
@@ -1688,10 +2846,10 @@
 
     await clearInstanceSelection();
     await focusPreferredGradeTile();
-    await sleep(40);
+    await sleep(W.short);
     const activated = activateTrajectoryClass();
     if (!activated) return { ok: false, error: "no-trajectory-class" };
-    await sleep(180);
+    await sleep(W.panel);
 
     const gradeHit = [...document.querySelectorAll("label, [role='radio'], button, [role='button']")].find(
       (el) => {
@@ -1703,11 +2861,11 @@
     );
     if (gradeHit) gradeHit.click();
     else pressEditorKey("q");
-    await sleep(100);
+    await sleep(W.med);
 
     const jumped = await goToFrame(at);
     document.activeElement?.blur?.();
-    await sleep(40);
+    await sleep(W.short);
 
     if (jumped.ok) {
       clickControlByText([/this frame\s*&\s*save/i, /^this frame$/i, /this frame/i]);
@@ -1730,7 +2888,13 @@
         );
       }
     }
-    await sleep(450);
+    await waitUntil(
+      () =>
+        !!findGradeNearStart(at, total) ||
+        listGradeRanges().some((r) => !before.has(r.el)) ||
+        !!findRangeBoundInputs(),
+      { timeout: W.create, interval: W.tick }
+    );
 
     let pin =
       findGradeNearStart(at, total) ||
@@ -1742,14 +2906,269 @@
       } catch {
         /* ignore */
       }
-      await sleep(220);
+      await waitUntil(() => !!findRangeBoundInputs(), { timeout: W.panel, interval: W.tick });
       pin = findGradeNearStart(at, total) || pin;
     }
 
+    // Incomplete is applied after G2 bounds are final (not at pin-create time).
     if (findRangeBoundInputs() || pin) {
-      return { ok: true, via: jumped.ok ? "pin-at-frame" : "pin-provisional", created: true, frame: at, range: pin };
+      return {
+        ok: true,
+        via: jumped.ok ? "pin-at-frame" : "pin-provisional",
+        created: true,
+        frame: at,
+        range: pin,
+        gradeValue: null,
+      };
     }
-    return { ok: false, error: "create-tail-pin-failed", frame: at };
+    return { ok: false, error: "create-tail-pin-failed", frame: at, gradeValue: null };
+  }
+
+  /**
+   * Create a Step pin at `frame` for S2 (post-last-step tail).
+   * Success requires a discoverable pin element (geometry) — Range inputs alone
+   * are not enough (they may belong to another selection).
+   */
+  async function createStepPinAt(frame) {
+    const total = getTotalFrames();
+    const at = Math.max(0, Math.min(Math.floor(frame), episodeLastFrame(total) ?? Math.floor(frame)));
+    const before = new Set(listAllStepRanges(total).map((r) => r.el));
+
+    await clearInstanceSelection();
+    await focusPreferredGradeTile();
+    await sleep(W.short);
+    const activated = activateStepClass();
+    if (!activated) return { ok: false, error: "no-step-class" };
+    await sleep(W.panel);
+
+    // Do not set Step Outcome before the pin exists — Outcome radios need an instance.
+
+    const jumped = await goToFrame(at);
+    document.activeElement?.blur?.();
+    await sleep(W.short);
+
+    if (jumped.ok) {
+      clickControlByText([/this frame\s*&\s*save/i, /^this frame$/i, /this frame/i]);
+    } else if (total) {
+      const row = findRowByTestId("row-step");
+      if (row) {
+        const rect = row.getBoundingClientRect();
+        const x = rect.left + Math.max(4, (at / Math.max(1, total - 1)) * rect.width);
+        const y = rect.top + rect.height / 2;
+        const el = document.elementFromPoint(x, y) || row;
+        el.dispatchEvent(
+          new MouseEvent("click", {
+            bubbles: true,
+            cancelable: true,
+            clientX: x,
+            clientY: y,
+            altKey: true,
+            view: window,
+          })
+        );
+      }
+    }
+    await waitUntil(
+      () =>
+        !!findStepTailByGeometry(at, total) ||
+        listAllStepRanges(total).some((r) => !before.has(r.el)),
+      { timeout: W.create, interval: W.tick }
+    );
+
+    let pin =
+      findStepTailByGeometry(at, total) ||
+      listAllStepRanges(total).find((r) => !before.has(r.el)) ||
+      null;
+    if (pin?.el) {
+      try {
+        pin.el.click();
+      } catch {
+        /* ignore */
+      }
+      await waitUntil(() => !!findRangeBoundInputs(), { timeout: W.panel, interval: W.tick });
+      pin = findStepTailByGeometry(at, total) || pin;
+    }
+
+    if (!pin?.el) {
+      return { ok: false, error: "create-step-tail-pin-failed", frame: at };
+    }
+    return {
+      ok: true,
+      via: jumped.ok ? "pin-at-frame" : "pin-provisional",
+      created: true,
+      frame: at,
+      range: pin,
+    };
+  }
+
+  /** Expand Step pin → [start,end] via Fill-at-start/end + lean (full resize last resort). */
+  async function expandStepPinToRange(pin, start, end) {
+    const total = getTotalFrames();
+    if (!pin?.el) return { ok: false, error: "no-step-pin" };
+
+    const refreshStep = () => findStepTailByGeometry(start, total) || pin;
+
+    let wrote = await expandPinToRange(pin, start, end, {
+      matchStart: start,
+      lockToSelectRange: true,
+      selectRange: pin,
+      refresh: refreshStep,
+    });
+    let step = refreshStep() || wrote.range || pin;
+    let spanOk =
+      step &&
+      Math.abs(step.startFrame - start) <= BOUND_EPS &&
+      Math.abs(step.endFrame - end) <= BOUND_EPS;
+
+    if (wrote.ok && spanOk) {
+      return { ok: true, via: wrote.via || "expand-pin", step };
+    }
+
+    wrote = await resizeViaRangeInputs(start, end, {
+      matchStart: start,
+      selectRange: step || pin,
+      lockToSelectRange: true,
+    });
+    await sleep(W.med);
+    step = findStepTailByGeometry(start, total) || step;
+    spanOk =
+      step &&
+      Math.abs(step.startFrame - start) <= BOUND_EPS &&
+      Math.abs(step.endFrame - end) <= BOUND_EPS;
+    return {
+      ok: !!(wrote.ok && spanOk),
+      via: wrote.via || "range-inputs",
+      step,
+      wrote,
+    };
+  }
+
+  /**
+   * After G2 Incomplete is committed: S2 span lastStepEnd+1 → episode end,
+   * Step 1 identity + Step Outcome Incomplete, then Done/Esc.
+   */
+  async function ensureIncompleteStepTail({ tailStart, episodeEnd }) {
+    const tAll = nowMs();
+    const timing = { createMs: 0, expandMs: 0, outcomeMs: 0, totalMs: 0 };
+    const total = getTotalFrames();
+    if (episodeEnd == null || tailStart == null || tailStart > episodeEnd) {
+      timing.totalMs = msSince(tAll);
+      return { ok: true, skipped: true, reason: "no-step-tail-frames", timing };
+    }
+
+    function findTailStep() {
+      return findStepTailByGeometry(tailStart, total);
+    }
+
+    function isReady(s) {
+      return (
+        s &&
+        Math.abs(s.startFrame - tailStart) <= BOUND_EPS &&
+        Math.abs(s.endFrame - episodeEnd) <= BOUND_EPS
+      );
+    }
+
+    let step = findTailStep();
+    // Already synced if span is right and Step Outcome Incomplete is checked
+    if (isReady(step)) {
+      try {
+        step.el.click();
+      } catch {
+        /* ignore */
+      }
+      await sleep(W.panel);
+      if (findStepOutcomeIncompleteChecked().ok) {
+        timing.totalMs = msSince(tAll);
+        return {
+          ok: true,
+          skipped: true,
+          reason: "step-tail-already-synced",
+          step,
+          label: "incomplete",
+          timing,
+        };
+      }
+    }
+
+    // Create pin at tailStart if missing / wrong start
+    if (!step || Math.abs((step.startFrame ?? -1) - tailStart) > 2) {
+      const tCreate = nowMs();
+      const created = await createStepPinAt(tailStart);
+      timing.createMs = msSince(tCreate);
+      if (!created.ok) {
+        timing.totalMs = msSince(tAll);
+        return {
+          ok: false,
+          error: created.error || "create-step-tail-failed",
+          created,
+          timing,
+        };
+      }
+      step = findTailStep() || created.range;
+      if (!step?.el) {
+        timing.totalMs = msSince(tAll);
+        return { ok: false, error: "no-step-tail-instance", created, timing };
+      }
+    }
+
+    // Expand pin → episode end (geometry-backed; do not trust Range inputs alone)
+    const tExpand = nowMs();
+    let wrote = { ok: false };
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      step = findTailStep() || step;
+      wrote = await expandStepPinToRange(step, tailStart, episodeEnd);
+      await sleep(W.med);
+      step = findTailStep() || wrote.step || step;
+      if (isReady(step)) break;
+    }
+    timing.expandMs = msSince(tExpand);
+
+    step = findTailStep() || step;
+    if (!isReady(step)) {
+      timing.totalMs = msSince(tAll);
+      return {
+        ok: false,
+        error: "step-tail-expand-failed",
+        step,
+        wrote,
+        expected: { start: tailStart, end: episodeEnd },
+        timing,
+      };
+    }
+
+    // Step Outcome → Incomplete (verify radio, not timeline label)
+    const tOutcome = nowMs();
+    let stepValue = { ok: false };
+    for (let i = 0; i < 2; i += 1) {
+      step = findTailStep() || step;
+      stepValue = await applyIncompleteStepToRange(step);
+      await sleep(W.med);
+      if (stepValue.ok || findStepOutcomeIncompleteChecked().ok) {
+        stepValue = { ...stepValue, ok: true };
+        break;
+      }
+    }
+    timing.outcomeMs = msSince(tOutcome);
+
+    await blurRangeFrameInputs();
+    await sleep(W.short);
+
+    step = findTailStep() || step;
+    const outcomeOk = stepValue.ok || findStepOutcomeIncompleteChecked().ok;
+    const ok = isReady(step) && outcomeOk;
+    timing.totalMs = msSince(tAll);
+    return {
+      ok,
+      via: wrote.via || "expand+step-outcome-incomplete",
+      label: "incomplete",
+      startFrame: tailStart,
+      endFrame: episodeEnd,
+      wrote,
+      stepValue,
+      step,
+      timing,
+      error: ok ? undefined : outcomeOk ? "step-tail-bounds" : "step-outcome-incomplete-or-bounds",
+    };
   }
 
   function snapshot() {
@@ -1801,13 +3220,21 @@
       Math.abs((gradeEndFrame ?? -1) - targetEndFrame) > BOUND_EPS;
 
     const tailGrade = hasTail ? findGradeNearStart(tailStart, totalFrames) : null;
+    const stepTail = hasTail
+      ? findStepNearStart(tailStart, { incomplete: true, totalFrames }) ||
+        findStepNearStart(tailStart, { totalFrames })
+      : null;
     const tailOk =
       !hasTail ||
       (tailGrade &&
-        (tailGrade.span ?? tailGrade.endFrame - tailGrade.startFrame) > 2 &&
         Math.abs(tailGrade.startFrame - tailStart) <= BOUND_EPS &&
         Math.abs(tailGrade.endFrame - episodeEnd) <= BOUND_EPS);
-    const needsSync = primaryNeedsSync || !tailOk;
+    const stepTailOk =
+      !hasTail ||
+      (stepTail &&
+        Math.abs(stepTail.startFrame - tailStart) <= BOUND_EPS &&
+        Math.abs(stepTail.endFrame - episodeEnd) <= BOUND_EPS);
+    const needsSync = primaryNeedsSync || !tailOk || !stepTailOk;
 
     return {
       ready: true,
@@ -1835,15 +3262,28 @@
             span: tailGrade.span,
           }
         : null,
+      stepTail: stepTail
+        ? {
+            stepNum: stepTail.stepNum,
+            incomplete: !!stepTail.incomplete,
+            label: (stepTail.label || "").slice(0, 40),
+            startFrame: stepTail.startFrame,
+            endFrame: stepTail.endFrame,
+            span: stepTail.span,
+          }
+        : null,
       target: { startFrame: 0, endFrame: targetEndFrame, startPct: 0, endPct: targetEndPct },
       tailTarget: hasTail ? { startFrame: tailStart, endFrame: episodeEnd } : null,
+      stepTailTarget: hasTail
+        ? { label: "incomplete", startFrame: tailStart, endFrame: episodeEnd }
+        : null,
       needsSync,
       gradeCount: listGradeRanges().length,
       definedSteps: defined,
       timelineMaxStep: timelineMax
         ? { stepNum: timelineMax.stepNum, endFrame: pctToEndFrame(timelineMax.end, totalFrames) }
         : null,
-      key: `step${lastStep.stepNum}:${targetEndFrame}:${totalFrames}:tail${hasTail ? `${tailStart}-${episodeEnd}` : "none"}`,
+      key: `step${lastStep.stepNum}:${targetEndFrame}:${totalFrames}:tail${hasTail ? `${tailStart}-${episodeEnd}` : "none"}:s2=incomplete`,
     };
   }
 
@@ -1882,14 +3322,26 @@
       return { ok: false, skipped: true, reason: "not-editor" };
     }
 
+    function toastWaiting(wantStep) {
+      if (quiet) return;
+      const msg =
+        wantStep != null && Number.isFinite(Number(wantStep))
+          ? `Waiting for Step ${wantStep}`
+          : "Waiting for Step list";
+      lastToastKey = msg;
+      showToast(msg, "info");
+    }
+
     // Auto path: require ontology last Step id, and that it exists on the timeline.
     if (!force) {
       const defined = await ensureDefinedLastStep();
       if (!defined?.lastStepNum) {
+        toastWaiting(null);
         return { ok: false, skipped: true, reason: "no-defined-steps" };
       }
       const onTimeline = findStepRangeByNum(defined.lastStepNum);
       if (!onTimeline) {
+        toastWaiting(defined.lastStepNum);
         return {
           ok: false,
           skipped: true,
@@ -1899,37 +3351,92 @@
         };
       }
     } else {
-      // Manual sync: refresh defined steps so target prefers ontology last if present
-      await ensureDefinedLastStep();
+      // Manual Annotate now: refresh defined steps so target prefers ontology last if present
+      const defined = await ensureDefinedLastStep();
+      if (!defined?.lastStepNum) {
+        toastWaiting(null);
+        return { ok: false, skipped: true, reason: "no-defined-steps", defined };
+      }
+      if (!findStepRangeByNum(defined.lastStepNum)) {
+        toastWaiting(defined.lastStepNum);
+        return {
+          ok: false,
+          skipped: true,
+          reason: "waiting-for-last-defined-step",
+          wantStep: defined.lastStepNum,
+          timelineMax: findLastTimelineStepRange()?.stepNum ?? null,
+        };
+      }
     }
 
     const snap = snapshot();
-    if (!snap.ready) return { ok: false, skipped: true, reason: snap.reason, snap };
+    if (!snap.ready) {
+      if (
+        snap.reason === "last-defined-step-not-on-timeline" ||
+        snap.reason === "no-last-step" ||
+        snap.reason === "no-defined-steps"
+      ) {
+        toastWaiting(snap.definedSteps?.lastStepNum ?? null);
+      }
+      return { ok: false, skipped: true, reason: snap.reason, snap };
+    }
     if (!snap.needsSync && !force) {
       return { ok: true, skipped: true, reason: "already-synced", snap };
     }
 
     syncing = true;
+    if (!quiet) showProgress("Annotating");
+    const tSync = nowMs();
+    const timing = {
+      focusMs: 0,
+      ensureMs: 0,
+      ensureVia: null,
+      g1Ms: 0,
+      g1Via: null,
+      g1RetryMs: 0,
+      g2CreateMs: 0,
+      g2ResizeMs: 0,
+      g2Via: null,
+      g1RestoreMs: 0,
+      g1RestoreVia: null,
+      g2RecheckMs: 0,
+      g2IncompleteMs: 0,
+      s2Ms: 0,
+      s2CreateMs: 0,
+      s2ExpandMs: 0,
+      s2OutcomeMs: 0,
+      s2Via: null,
+      handoffMs: 0,
+      totalMs: 0,
+    };
     try {
       // Details panel steals focus — wait until the editor is focused before creating Grade.
+      let tPhase = nowMs();
       await waitForPageFocus(force ? 2500 : 800);
+      timing.focusMs = msSince(tPhase);
 
       // Absolute bounds only — never derive start from playhead / currentFrame
       const endFrame = snap.target.endFrame;
 
+      tPhase = nowMs();
       const ensured = await ensureTrajectoryInstance();
+      timing.ensureMs = msSince(tPhase);
+      timing.ensureVia = ensured.via || null;
       if (!ensured.ok) {
+        timing.totalMs = msSince(tSync);
+        logSyncTiming(timing, false);
         if (!quiet) {
           const msg = "Could not open/create trajectory for Grade sync.";
-          if (lastToastKey !== msg) {
-            lastToastKey = msg;
-            showToast(msg, "warn");
-          }
+          lastToastKey = msg;
+          showToast(msg, "warn");
         }
-        return { ok: false, error: ensured.error || "ensure-failed", ensured, snap };
+        return { ok: false, error: ensured.error || "ensure-failed", ensured, snap, timing };
       }
 
-      const wrote = await resizeViaRangeInputs(0, endFrame, { matchStart: 0 });
+      tPhase = nowMs();
+      const wrote = await resizeRangeSmart(0, endFrame, { matchStart: 0 });
+      timing.g1Ms = msSince(tPhase);
+      timing.g1Via = wrote.path || wrote.via || null;
       if (wrote.ok) {
         // Final guard: start must be 0 and end must be last-step (not playhead)
         const check = snapshot();
@@ -1945,7 +3452,9 @@
           Math.abs(endFrame - playhead) > BOUND_EPS;
 
         if (!startOk || !endOk || endIsPlayhead) {
-          const retry = await resizeViaRangeInputs(0, endFrame, { matchStart: 0 });
+          tPhase = nowMs();
+          const retry = await resizeRangeSmart(0, endFrame, { matchStart: 0 });
+          timing.g1RetryMs = msSince(tPhase);
           const afterRetry = snapshot();
           const retryOk =
             retry.ok &&
@@ -1953,6 +3462,8 @@
             Math.abs((afterRetry.grade.startFrame ?? -1) - 0) <= BOUND_EPS &&
             Math.abs((afterRetry.grade.endFrame ?? -1) - endFrame) <= BOUND_EPS;
           if (!retryOk) {
+            timing.totalMs = msSince(tSync);
+            logSyncTiming(timing, false);
             return {
               ok: false,
               error: endIsPlayhead ? "end-is-playhead" : "bounds-mismatch",
@@ -1961,6 +3472,7 @@
               snap: afterRetry,
               playhead,
               wantEnd: endFrame,
+              timing,
             };
           }
         }
@@ -1974,10 +3486,17 @@
         let primaryGeo = findPrimaryGradeRange();
         let primaryEnd = primaryGeo?.endFrame ?? endFrame;
         if (primaryEnd < endFrame && endFrame - primaryEnd <= 2) {
-          const fixShort = await resizeViaRangeInputs(0, endFrame, { matchStart: 0 });
+          tPhase = nowMs();
+          let fixShort = await quickRestorePrimaryEnd(endFrame);
+          if (!fixShort.ok) {
+            fixShort = await resizeRangeSmart(0, endFrame, { matchStart: 0 });
+          }
+          timing.g1RetryMs += msSince(tPhase);
           primaryGeo = findPrimaryGradeRange();
           primaryEnd = primaryGeo?.endFrame ?? primaryEnd;
           if (!fixShort.ok || primaryEnd < endFrame) {
+            timing.totalMs = msSince(tSync);
+            logSyncTiming(timing, false);
             return {
               ok: false,
               error: "primary-end-short",
@@ -1986,25 +3505,28 @@
               wantEnd: endFrame,
               primaryEnd,
               snap: snapshot(),
+              timing,
             };
           }
         }
         const tailStart = endFrame + 1;
         let wroteTail = { ok: true, skipped: true, reason: "no-tail-frames" };
+        let wroteStepTail = { ok: true, skipped: true, reason: "no-tail-frames" };
         if (episodeEnd != null && tailStart <= episodeEnd) {
           let tail = findGradeNearStart(tailStart, total);
           // Prefer an existing non-primary grade in the tail region; avoid the primary.
           if (tail && tail.startFrame <= 1) tail = null;
           const tailReady =
             tail &&
-            (tail.span ?? 0) > 2 &&
             Math.abs(tail.startFrame - tailStart) <= BOUND_EPS &&
             Math.abs(tail.endFrame - episodeEnd) <= BOUND_EPS;
           if (!tailReady) {
             if (!tail || Math.abs((tail.startFrame ?? -1) - tailStart) > 2) {
               // Create far from G1's end so Encord doesn't auto-trim the abutting edge.
               const pinAt = episodeEnd;
+              tPhase = nowMs();
               const createdTail = await createGradePinAt(pinAt);
+              timing.g2CreateMs = msSince(tPhase);
               if (!createdTail.ok) {
                 wroteTail = { ok: false, error: createdTail.error || "create-tail-failed", createdTail };
               } else {
@@ -2019,11 +3541,14 @@
               }
             }
             if (wroteTail.ok !== false && tail) {
-              wroteTail = await resizeViaRangeInputs(tailStart, episodeEnd, {
+              tPhase = nowMs();
+              wroteTail = await resizeRangeSmart(tailStart, episodeEnd, {
                 matchStart: Math.max(tailStart, tail.startFrame || tailStart),
                 selectRange: tail,
                 lockToSelectRange: true,
               });
+              timing.g2ResizeMs = msSince(tPhase);
+              timing.g2Via = wroteTail.path || wroteTail.via || null;
             } else if (wroteTail.ok !== false && !tail) {
               wroteTail = { ok: false, error: "no-tail-instance" };
             }
@@ -2031,20 +3556,30 @@
             wroteTail = { ok: true, skipped: true, reason: "tail-already-synced" };
           }
 
-          // Re-assert G1 after G2 — Encord / mistaken Fill can still trim primary by 1.
-          await sleep(120);
+          // Re-assert G1 after G2 — only if exact bounds broken (Fill-at-start used to trim by 1).
           primaryGeo = findPrimaryGradeRange();
           if (
-            !primaryGeo ||
-            Math.abs((primaryGeo.endFrame ?? -1) - endFrame) > BOUND_EPS ||
-            Math.abs((primaryGeo.startFrame ?? -1) - 0) > BOUND_EPS
+            primaryGeo &&
+            Math.abs((primaryGeo.endFrame ?? -1) - endFrame) <= BOUND_EPS &&
+            Math.abs((primaryGeo.startFrame ?? -1) - 0) <= BOUND_EPS
           ) {
-            const restorePrimary = await resizeViaRangeInputs(0, endFrame, { matchStart: 0 });
+            timing.g1RestoreVia = "unneeded";
+          } else {
+            tPhase = nowMs();
+            let restorePrimary = await quickRestorePrimaryEnd(endFrame);
+            if (!restorePrimary.ok) {
+              restorePrimary = await resizeRangeSmart(0, endFrame, { matchStart: 0 });
+            }
+            timing.g1RestoreMs = msSince(tPhase);
+            timing.g1RestoreVia = restorePrimary.via || restorePrimary.path || null;
             primaryGeo = findPrimaryGradeRange();
             if (
               !restorePrimary.ok ||
-              Math.abs((primaryGeo?.endFrame ?? -1) - endFrame) > BOUND_EPS
+              Math.abs((primaryGeo?.endFrame ?? -1) - endFrame) > BOUND_EPS ||
+              Math.abs((primaryGeo?.startFrame ?? -1) - 0) > BOUND_EPS
             ) {
+              timing.totalMs = msSince(tSync);
+              logSyncTiming(timing, false);
               return {
                 ok: false,
                 error: "primary-trimmed-by-tail",
@@ -2054,190 +3589,211 @@
                 wantEnd: endFrame,
                 primaryEnd: primaryGeo?.endFrame,
                 snap: snapshot(),
+                timing,
               };
             }
           }
 
-          // G1 restore / blur often leaves G2 short of episode end — always re-check.
-          // Episode last frame == totalFrames; verify CSS and Range end input.
-          await sleep(100);
+          // G2 recheck — geometry first; no settle sleep when already exact.
+          tPhase = nowMs();
           let tailAfter = findGradeNearStart(tailStart, total);
           if (tailAfter && tailAfter.startFrame > 1) {
             const startOk = Math.abs(tailAfter.startFrame - tailStart) <= BOUND_EPS;
             let endOk = Math.abs((tailAfter.endFrame ?? -1) - episodeEnd) <= BOUND_EPS;
-            if (!endOk) {
-              try {
-                tailAfter.el.click();
-                await sleep(150);
-                const b = findRangeBoundInputs();
-                const endVal = b
-                  ? Number(String(b.end.value || "").replace(/[^\d]/g, ""))
-                  : null;
-                if (endVal != null && Math.abs(endVal - episodeEnd) <= BOUND_EPS) {
-                  endOk = true;
-                }
-              } catch {
-                /* ignore */
-              }
-            }
-            if (!startOk) {
-              wroteTail = await resizeViaRangeInputs(tailStart, episodeEnd, {
-                matchStart: tailStart,
-                selectRange: tailAfter,
-                lockToSelectRange: true,
-              });
-              tailAfter = findGradeNearStart(tailStart, total) || tailAfter;
-            } else if (!endOk) {
-              const extended = await extendGradeEndOnly(tailAfter, episodeEnd, {
-                matchStart: tailStart,
-              });
-              wroteTail = extended.ok
-                ? { ok: true, via: "extend-end-only", extended }
-                : { ok: false, error: extended.error || "tail-end-short", extended };
-              tailAfter = findGradeNearStart(tailStart, total) || tailAfter;
-            }
-            // Final end check even after full resize
-            if (wroteTail.ok !== false && tailAfter) {
-              let stillShort =
-                Math.abs((tailAfter.endFrame ?? -1) - episodeEnd) > BOUND_EPS;
-              if (stillShort) {
+            if (!(startOk && endOk)) {
+              if (!endOk) {
                 try {
                   tailAfter.el.click();
-                  await sleep(120);
+                  await sleep(W.short);
                   const b = findRangeBoundInputs();
                   const endVal = b
                     ? Number(String(b.end.value || "").replace(/[^\d]/g, ""))
                     : null;
                   if (endVal != null && Math.abs(endVal - episodeEnd) <= BOUND_EPS) {
-                    stillShort = false;
+                    endOk = true;
                   }
                 } catch {
                   /* ignore */
                 }
               }
-              if (stillShort) {
+              if (!startOk) {
+                wroteTail = await resizeRangeSmart(tailStart, episodeEnd, {
+                  matchStart: tailStart,
+                  selectRange: tailAfter,
+                  lockToSelectRange: true,
+                });
+                tailAfter = findGradeNearStart(tailStart, total) || tailAfter;
+              } else if (!endOk) {
                 const extended = await extendGradeEndOnly(tailAfter, episodeEnd, {
                   matchStart: tailStart,
                 });
-                if (!extended.ok) {
-                  wroteTail = {
-                    ok: false,
-                    error: "tail-end-short",
-                    extended,
-                    endFrame: tailAfter.endFrame,
-                    wantEnd: episodeEnd,
-                  };
-                } else {
-                  wroteTail = { ok: true, via: "extend-end-only-final", extended };
+                wroteTail = extended.ok
+                  ? { ok: true, via: "extend-end-only", extended }
+                  : { ok: false, error: extended.error || "tail-end-short", extended };
+                tailAfter = findGradeNearStart(tailStart, total) || tailAfter;
+              }
+              if (wroteTail.ok !== false && tailAfter) {
+                let stillShort =
+                  Math.abs((tailAfter.endFrame ?? -1) - episodeEnd) > BOUND_EPS;
+                if (stillShort) {
+                  try {
+                    tailAfter.el.click();
+                    await sleep(W.short);
+                    const b = findRangeBoundInputs();
+                    const endVal = b
+                      ? Number(String(b.end.value || "").replace(/[^\d]/g, ""))
+                      : null;
+                    if (endVal != null && Math.abs(endVal - episodeEnd) <= BOUND_EPS) {
+                      stillShort = false;
+                    }
+                  } catch {
+                    /* ignore */
+                  }
+                }
+                if (stillShort) {
+                  const extended = await extendGradeEndOnly(tailAfter, episodeEnd, {
+                    matchStart: tailStart,
+                  });
+                  if (!extended.ok) {
+                    wroteTail = {
+                      ok: false,
+                      error: "tail-end-short",
+                      extended,
+                      endFrame: tailAfter.endFrame,
+                      wantEnd: episodeEnd,
+                    };
+                  } else {
+                    wroteTail = { ok: true, via: "extend-end-only-final", extended };
+                  }
                 }
               }
             }
           }
+          timing.g2RecheckMs = msSince(tPhase);
+
+          // G2 Incomplete: after bounds are final → I → Done/Esc.
+          const tailForValue =
+            findGradeNearStart(tailStart, total) || tailAfter || tail;
+          let gradeValue = null;
+          if (wroteTail.ok !== false && tailForValue?.el) {
+            tPhase = nowMs();
+            gradeValue = await applyIncompleteGradeToRange(tailForValue);
+            timing.g2IncompleteMs = msSince(tPhase);
+            wroteTail = { ...wroteTail, gradeValue };
+            await sleep(W.short);
+          }
           primaryEnd = findPrimaryGradeRange()?.endFrame ?? endFrame;
+
+          // S2: same span as G2 → Step 1 + Step Outcome Incomplete → Done/Esc
+          if (wroteTail.ok !== false) {
+            tPhase = nowMs();
+            wroteStepTail = await ensureIncompleteStepTail({ tailStart, episodeEnd });
+            timing.s2Ms = msSince(tPhase);
+            if (wroteStepTail?.timing) {
+              timing.s2CreateMs = wroteStepTail.timing.createMs || 0;
+              timing.s2ExpandMs = wroteStepTail.timing.expandMs || 0;
+              timing.s2OutcomeMs = wroteStepTail.timing.outcomeMs || 0;
+            }
+            timing.s2Via = wroteStepTail?.via || wroteStepTail?.wrote?.via || null;
+          } else {
+            wroteStepTail = { ok: false, skipped: true, reason: "g2-failed" };
+          }
+        }
+
+        // Hand focus to G1 only (never G2)
+        let gradeHandoff = null;
+        if (wroteTail.ok !== false && wroteStepTail.ok !== false) {
+          tPhase = nowMs();
+          gradeHandoff = await selectGradeForOperator();
+          timing.handoffMs = msSince(tPhase);
         }
 
         const after = snapshot();
         lastAppliedKey = snap.key;
         await blurRangeFrameInputs();
+        await sleep(W.short);
+        timing.totalMs = msSince(tSync);
+        const syncOk = wroteTail.ok !== false && wroteStepTail.ok !== false;
+        logSyncTiming(timing, syncOk);
         if (!quiet) {
-          const tailBit =
-            wroteTail.skipped && wroteTail.reason === "no-tail-frames"
-              ? ""
-              : wroteTail.ok
-                ? ` + ${tailStart}–${episodeEnd}`
-                : ` (tail ${tailStart}–${episodeEnd} failed)`;
-          const msg = ensured.created
-            ? `Grade 0–${primaryEnd}${tailBit} (step ${snap.lastStep.stepNum})`
-            : `Grade set 0–${primaryEnd}${tailBit} (step ${snap.lastStep.stepNum})`;
-          if (lastToastKey !== msg) {
-            lastToastKey = msg;
-            showToast(msg, wroteTail.ok === false ? "warn" : "ok");
-          }
+          const msg = syncOk ? "Annotation complete" : "Annotation incomplete";
+          lastToastKey = msg;
+          showToast(msg, syncOk ? "ok" : "warn");
         }
         return {
-          ok: wroteTail.ok !== false,
+          ok: syncOk,
           method: "ensure+range-inputs+tail",
           snap: after,
           ensured,
           wrote,
           wroteTail,
+          wroteStepTail,
+          gradeHandoff,
           primaryEnd,
-          error: wroteTail.ok === false ? wroteTail.error : undefined,
+          timing,
+          error:
+            wroteTail.ok === false
+              ? wroteTail.error
+              : wroteStepTail.ok === false
+                ? wroteStepTail.error
+                : undefined,
         };
       }
 
+      timing.totalMs = msSince(tSync);
+      logSyncTiming(timing, false);
       if (!quiet) {
         const msg =
           wrote.error === "cannot-set-timeline-range"
             ? `Could not commit Grade on the timeline (${wrote.timeline?.startFrame ?? "?"}–${wrote.timeline?.endFrame ?? "?"} vs 0–${endFrame}).`
             : `Could not set Range start/end (${wrote.error || "failed"}).`;
-        if (lastToastKey !== msg) {
-          lastToastKey = msg;
-          showToast(msg, "warn");
-        }
+        lastToastKey = msg;
+        showToast(msg, "warn");
       }
-      return { ok: false, error: wrote.error || "range-inputs-failed", ensured, wrote, snap };
+      return { ok: false, error: wrote.error || "range-inputs-failed", ensured, wrote, snap, timing };
     } catch (err) {
-      return { ok: false, error: err?.message || String(err), snap };
+      timing.totalMs = msSince(tSync);
+      logSyncTiming(timing, false);
+      if (!quiet) {
+        showToast(err?.message || "Annotation failed.", "warn");
+      }
+      return { ok: false, error: err?.message || String(err), snap, timing };
     } finally {
       syncing = false;
+      // If a failure path skipped showToast, clear the in-progress chip
+      if (!quiet) dismissProgress();
     }
   }
 
-  /** After Step edit → Escape/Done, fit Grade only if ontology last Step is on the timeline. */
+  /**
+   * Auto annotation: Esc/Done → full sync once per episode when last defined Step is present.
+   * Further last-Step edits do not re-run. Manual Annotate now (force:true) bypasses this.
+   */
   function scheduleWorkflowSync() {
     if (!enabled || syncing) return;
     clearTimeout(debounceTimer);
     debounceTimer = setTimeout(() => {
       (async () => {
+        resetAutoAnnotateIfEpisodeChanged();
+        if (autoAnnotatedOnce) return;
         const defined = await ensureDefinedLastStep();
         if (!defined?.lastStepNum) return;
         if (!findStepRangeByNum(defined.lastStepNum)) return;
-        await syncGrade({ quiet: false });
+        const snap = snapshot();
+        if (!snap.ready) return;
+        const result = await syncGrade({ quiet: false });
+        // Lock only after a real successful auto pass (not skip/fail)
+        if (result?.ok && !result?.skipped) {
+          autoAnnotatedOnce = true;
+          autoAnnotatedEpisodeKey = getEpisodeKey();
+        }
       })().catch(() => {});
     }, WORKFLOW_DEBOUNCE_MS);
   }
 
-  /**
-   * When the last defined Step's end moves on the timeline (e.g. drag ±1 frame),
-   * re-fit Grade to match — without waiting for Escape/Done.
-   */
+  /** Resize/drag no longer auto-annotates — Esc/Done one-shot is the only auto path. */
   function scheduleLastStepResizeSync() {
-    if (!enabled || syncing) return;
-    clearTimeout(lastStepResizeTimer);
-    lastStepResizeTimer = setTimeout(() => {
-      (async () => {
-        const defined = await ensureDefinedLastStep();
-        if (!defined?.lastStepNum) return;
-        const lastRange = findStepRangeByNum(defined.lastStepNum);
-        if (!lastRange) return;
-
-        const total = getTotalFrames();
-        if (!total) return;
-        const endFrame = pctToEndFrame(lastRange.end, total);
-        const endKey = `step${defined.lastStepNum}:${endFrame}:${total}`;
-
-        // Still settling / unchanged
-        if (endKey === lastObservedStepEndKey && endKey === lastAppliedKey) return;
-
-        const grade = findPrimaryGradeRange();
-        // Only auto-refit when Grade already exists (creation stays Escape/Done gated)
-        if (!grade) {
-          lastObservedStepEndKey = endKey;
-          return;
-        }
-
-        const gradeEnd = pctToEndFrame(grade.end, total);
-        const gradeStart = pctToFrame(grade.left, total);
-        const already =
-          Math.abs(gradeStart - 0) <= BOUND_EPS &&
-          Math.abs(gradeEnd - endFrame) <= BOUND_EPS;
-        lastObservedStepEndKey = endKey;
-        if (already) return;
-
-        await syncGrade({ quiet: true });
-      })().catch(() => {});
-    }, LAST_STEP_RESIZE_DEBOUNCE_MS);
+    /* intentionally no-op */
   }
 
   function ensureStepRowObserver() {
@@ -2270,7 +3826,7 @@
     try {
       const stored = await chrome.storage.local.get(STORAGE_ENABLED);
       if (typeof stored[STORAGE_ENABLED] === "boolean") enabled = stored[STORAGE_ENABLED];
-      else enabled = true; // on by default — Escape/Done after last *defined* Step
+      else enabled = true; // on by default — one-shot annotation after Esc/Done
     } catch {
       enabled = true;
     }
@@ -2378,7 +3934,7 @@
       enabled = message.enabled !== false;
       chrome.storage.local.set({ [STORAGE_ENABLED]: enabled }).then(() => {
         sendResponse({ ok: true, enabled });
-        if (enabled) scheduleWorkflowSync();
+        // Do not sync on toggle — wait for Esc/Done after last defined Step
       });
       return true;
     }

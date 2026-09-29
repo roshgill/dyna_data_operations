@@ -3,59 +3,48 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Dyna Ops: Encord Camera Layout</title>
+    <title>Dyna Ops: Encord Automations</title>
     <link rel="stylesheet" href="popup.css" />
   </head>
   <body>
     <main>
       <header class="hero">
-        <h1>Dyna Ops: Encord Camera Layout</h1>
-        <p class="hint">Arrange camera layout to your preference, then save. Click the toolbar icon to restore them for new episodes.</p>
+        <h1>Dyna Ops: Encord Automations</h1>
       </header>
 
-      <div class="actions">
-        <button id="restore" type="button" class="primary">
-          Restore layout<span class="dot-arrow" aria-hidden="true">···</span>
-        </button>
-        <button id="save" type="button">Save layout</button>
-      </div>
-
-      <section class="dev-tools">
-        <p class="meta">[ AUTO LAYOUT ]</p>
-        <label class="switch-row">
+      <section class="panel">
+        <p class="meta">[ CAMERA LAYOUT ]</p>
+        <p class="hint">
+          Arrange camera layout to your preference, then save. Click the toolbar icon to restore them for
+          new episodes.
+        </p>
+        <label class="switch-row auto-layout-row">
           <input id="auto-layout" type="checkbox" role="switch" />
           <span class="switch" aria-hidden="true"></span>
           <span>Auto-layout after page loads</span>
         </label>
+        <div class="actions">
+          <button id="restore" type="button" class="primary">
+            Restore layout<span class="dot-arrow" aria-hidden="true">···</span>
+          </button>
+          <button id="save" type="button">Save layout</button>
+        </div>
       </section>
 
-      <section class="dev-tools">
-        <p class="meta">[ GRADE ]</p>
-        <div hidden>
-          <p class="hint compact">
-            Auto-fit runs after the last defined Step is on the timeline (Escape / Done),
-            and again if that Step’s end is adjusted. Sync Grade now still forces a pass.
-          </p>
-          <label class="toggle-row">
-            <input id="auto-grade" type="checkbox" checked />
-            <span>Auto-fit Grade after last defined Step</span>
-          </label>
-        </div>
+      <section class="panel">
+        <p class="meta">[ ANNOTATION ]</p>
+        <p class="hint">
+          Applies incomplete Grade/Step annotations after last step is on the timeline
+        </p>
+        <label class="switch-row">
+          <input id="auto-grade" type="checkbox" role="switch" checked />
+          <span class="switch" aria-hidden="true"></span>
+          <span>Auto-annotate after last Step (Esc/Done)</span>
+        </label>
         <p id="grade-status" class="hint compact" aria-live="polite"></p>
         <div class="actions">
-          <button id="grade-sync" type="button">Sync Grade now</button>
+          <button id="grade-sync" type="button">Annotate now</button>
         </div>
-      </section>
-
-      <section class="dev-tools">
-        <p class="meta">[ DOM SCAN ]</p>
-        <p class="hint compact">Debug: copy editor DOM for Cursor.</p>
-        <div class="actions">
-          <button id="scan-full" type="button">Scan full episode DOM</button>
-          <button id="scan" type="button">Scan timeline only</button>
-          <button id="copy-scan" type="button" disabled>Copy scan result</button>
-        </div>
-        <textarea id="scan-out" class="scan-out" readonly rows="8" placeholder="Scan result appears here…"></textarea>
       </section>
 
       <section class="feedback">
@@ -63,7 +52,7 @@
       </section>
 
       <footer class="foot">
-        <span class="meta">v0.18.7</span>
+        <span class="meta">v0.18.48</span>
       </footer>
     </main>
     <script src="layout-ops.js"></script>
