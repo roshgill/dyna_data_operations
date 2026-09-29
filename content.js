@@ -1,8 +1,12 @@
 (() => {
-  const VERSION = "0.18.40";
+  const VERSION = "0.18.42";
   const STORAGE_KEY = "preferredCameras";
   const LAYOUT_KEY = "preferredMosaicLayout";
   const PREFERRED_ACTIVE_TILE = "cam_high";
+  /** Max wait for preferred tile to become clickable after mosaic apply. */
+  const PREFERRED_TILE_WAIT_MS = 6500;
+  const PREFERRED_TILE_MIN_W = 64;
+  const PREFERRED_TILE_MIN_H = 48;
 
   if (window.__encordCameraLayoutHandler) {
     try {
@@ -537,11 +541,16 @@
       message = "No saved layout yet. Arrange your cameras, then save.";
     }
 
-    // After layout settle, focus cam_high so annotating can start immediately.
-    await new Promise((r) => setTimeout(r, 150));
-    const selectResult = await selectTile(PREFERRED_ACTIVE_TILE);
+    // Wait until cam_high is a real clickable tile (not a loading ghost), then focus it.
+    await new Promise((r) => setTimeout(r, 50));
+    const waited = await waitForTileReady(PREFERRED_ACTIVE_TILE);
+    const selectResult = waited.ok
+      ? await selectTile(PREFERRED_ACTIVE_TILE)
+      : { ok: false, tileId: PREFERRED_ACTIVE_TILE, error: waited.error, waited };
     if (selectResult.ok) {
       message += ` · selected ${selectResult.tileId}`;
+    } else {
+      message += ` · ${PREFERRED_ACTIVE_TILE} not ready`;
     }
 
     return {
@@ -674,6 +683,29 @@
       win.querySelector(".mosaic-window-toolbar") ||
       win
     );
+  }
+
+  /** True when cam_high (etc.) is a real pane, not a thin loading ghost. */
+  function tileLooksClickable(tileId) {
+    const id = String(tileId || "");
+    const win = findTileWindow(id);
+    const target = pickClickTarget(win);
+    if (!target || !isVisible(target)) return false;
+    const box = (win || target).getBoundingClientRect();
+    // Ghost/minimized strips are tiny (~4% width); wait for a real tile.
+    return box.width >= PREFERRED_TILE_MIN_W && box.height >= PREFERRED_TILE_MIN_H;
+  }
+
+  async function waitForTileReady(tileId = PREFERRED_ACTIVE_TILE, timeoutMs = PREFERRED_TILE_WAIT_MS) {
+    const id = tileId || PREFERRED_ACTIVE_TILE;
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (tileLooksClickable(id)) {
+        return { ok: true, tileId: id, waitedMs: timeoutMs - (deadline - Date.now()) };
+      }
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    return { ok: false, tileId: id, error: `Timed out waiting for tile: ${id}` };
   }
 
   async function selectTile(tileId = PREFERRED_ACTIVE_TILE, attempts = 6) {
@@ -1589,15 +1621,24 @@
         chrome.runtime
           .sendMessage({ type: "TRY_AUTO_LAYOUT" })
           .then((result) => {
-            // Mark done on success or intentional block (wrong camera set) — retry on hard errors.
-            if (result?.ok || result?.blocked) autoLayoutDoneKey = key;
+            // Blocked (wrong camera set) = done. Layout ok but cam_high miss = allow retry.
+            if (result?.blocked) {
+              autoLayoutDoneKey = key;
+              return;
+            }
+            if (result?.ok && result.selectResult && result.selectResult.ok === false) {
+              // cam_high not ready yet — try again shortly without requiring a mosaic mutation
+              setTimeout(() => scheduleAutoLayout(), 2500);
+              return;
+            }
+            if (result?.ok) autoLayoutDoneKey = key;
           })
           .catch(() => {})
           .finally(() => {
             autoLayoutInFlight = false;
           });
       });
-    }, 1800);
+    }, 1200);
   }
 
   if (!window.__encordLayoutMismatchWatch) {
