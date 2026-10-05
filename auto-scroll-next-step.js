@@ -2,7 +2,8 @@
 // 1) New blank (unannotated) Step placed on timeline → scroll list to next Step (maxDefined+1)
 // 2) A Step is selected (Step Outcome open) → center that Step + Outcome block
 (() => {
-  const VERSION = "0.18.58-scroll";
+  const VERSION = "0.18.59-scroll";
+  const STORAGE_ENABLED = "autoScrollEnabled";
   /** Don't scroll-to-next for Step 1 — only once next target is Step 2+. */
   const MIN_TARGET_STEP = 2;
   const CENTER_TOL_PX = 40;
@@ -33,6 +34,7 @@
   }
   log("booting", VERSION, "prev=", window.__encordAutoScrollNextStep?.version || null);
 
+  let enabled = true;
   let debounceTimer = null;
   let retryTimer = null;
   /** @type {string | null} last mode+target key we successfully scrolled */
@@ -50,6 +52,17 @@
   let stepRowObserver = null;
   /** @type {string | null} pending mode from schedule */
   let pendingMode = null;
+
+  async function loadEnabled() {
+    try {
+      const stored = await chrome.storage.local.get(STORAGE_ENABLED);
+      if (typeof stored[STORAGE_ENABLED] === "boolean") enabled = stored[STORAGE_ENABLED];
+      else enabled = true;
+    } catch {
+      enabled = true;
+    }
+    log("enabled=", enabled);
+  }
 
   function normalizeLabel(raw) {
     return String(raw || "")
@@ -397,6 +410,9 @@
     let mode = opts.mode || pendingMode || "auto";
     pendingMode = null;
 
+    if (!enabled && !opts.force) {
+      return { ok: true, skipped: true, reason: "disabled" };
+    }
     if (!location.pathname.includes("/label_editor/")) {
       return { ok: false, reason: "not-editor" };
     }
@@ -539,6 +555,10 @@
   }
 
   function scheduleScroll(reason, mode = "auto") {
+    if (!enabled) {
+      log("scheduleScroll: skipped (disabled)", reason);
+      return;
+    }
     log("scheduleScroll:", reason, mode, {
       pendingAnnotationPlace,
       lastRangeTotal,
@@ -548,6 +568,7 @@
     clearTimeout(debounceTimer);
     debounceTimer = setTimeout(() => {
       try {
+        if (!enabled) return;
         if (
           reason === "range-added" ||
           reason === "blank-placed" ||
@@ -686,11 +707,12 @@
   }
 
   function startWatch() {
-    log("startWatch");
+    log("startWatch", { enabled });
     setTimeout(() => {
       if (!location.pathname.includes("/label_editor/")) return;
       ensureStepRowObserver();
       ensurePanelObserver();
+      if (!enabled) return;
       const stats = timelineStepStats();
       if (stats.blank >= 1 && stepsPanelOpen()) {
         pendingAnnotationPlace = true;
@@ -767,6 +789,10 @@
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message?.type === "AUTO_SCROLL_NEXT_STEP") {
+      if (!enabled) {
+        sendResponse({ ok: true, skipped: true, reason: "disabled" });
+        return false;
+      }
       lastScrollKey = null;
       lastAppliedScrollTop = null;
       sendResponse(runScroll({ mode: "next-list", force: true }));
@@ -778,6 +804,7 @@
       sendResponse({
         ok: true,
         version: VERSION,
+        enabled,
         stats,
         selected: selected?.stepNum ?? null,
         lastScrollKey,
@@ -786,7 +813,19 @@
       });
       return false;
     }
+    if (message?.type === "AUTO_SCROLL_SET_ENABLED") {
+      enabled = message.enabled !== false;
+      log("AUTO_SCROLL_SET_ENABLED", enabled);
+      sendResponse({ ok: true, enabled });
+      return false;
+    }
     return false;
+  });
+
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== "local" || !changes[STORAGE_ENABLED]) return;
+    enabled = changes[STORAGE_ENABLED].newValue !== false;
+    log("storage enabled →", enabled);
   });
 
   window.__encordAutoScrollNextStep = {
@@ -796,8 +835,11 @@
     findSelectedStepContext,
     findStepTreeitem,
     stepsPanelOpen,
+    get enabled() {
+      return enabled;
+    },
   };
 
-  startWatch();
+  loadEnabled().then(startWatch);
   log("ready", VERSION);
 })();

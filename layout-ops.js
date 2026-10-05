@@ -461,6 +461,28 @@ const LayoutOps = (() => {
     return { ok: true, enabled: !!enabled };
   }
 
+  async function getAutoScrollEnabled() {
+    const stored = await chrome.storage.local.get("autoScrollEnabled");
+    // Default on when unset (matches prior always-on behavior)
+    return stored.autoScrollEnabled !== false;
+  }
+
+  async function setAutoScrollEnabled(tab, enabled) {
+    await chrome.storage.local.set({ autoScrollEnabled: !!enabled });
+    try {
+      const active = tab ? await requireEncordTab(tab) : await getActiveTab();
+      if (active?.id && isEncordUrl(active.url)) {
+        await chrome.tabs.sendMessage(active.id, {
+          type: "AUTO_SCROLL_SET_ENABLED",
+          enabled: !!enabled,
+        });
+      }
+    } catch {
+      /* content may reload */
+    }
+    return { ok: true, enabled: !!enabled };
+  }
+
   /** Restore saved layout if auto-layout is on (used after episode render). */
   async function tryAutoLayout(tab) {
     const enabled = await getAutoLayoutEnabled();
@@ -487,6 +509,8 @@ const LayoutOps = (() => {
     setGradeEnabled,
     getAutoLayoutEnabled,
     setAutoLayoutEnabled,
+    getAutoScrollEnabled,
+    setAutoScrollEnabled,
     tryAutoLayout,
     checkMismatch,
     lockEpisodeDefault,
