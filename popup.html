@@ -19,7 +19,7 @@
           new episodes.
         </p>
         <label class="switch-row auto-layout-row">
-          <input id="auto-layout" type="checkbox" role="switch" />
+          <input id="auto-layout" type="checkbox" role="switch" checked />
           <span class="switch" aria-hidden="true"></span>
           <span>Auto-layout after page loads</span>
         </label>
@@ -48,8 +48,13 @@
         <p class="hint">
           Applies incomplete Grade/Step annotations after last step is on the timeline.
         </p>
+        <p class="hint warn" role="note">
+          <span class="warn-mark" aria-hidden="true">⚠</span>
+          Warning: use Auto-annotate only on episodes that require exactly one Grade, one
+          Incomplete Grade, and one Incomplete Step 1 at the end.
+        </p>
         <label class="switch-row">
-          <input id="auto-grade" type="checkbox" role="switch" checked />
+          <input id="auto-grade" type="checkbox" role="switch" />
           <span class="switch" aria-hidden="true"></span>
           <span>Auto-annotate after last Step (Esc/Done)</span>
         </label>
@@ -59,7 +64,7 @@
         </div>
       </section>
 
-      <section class="panel">
+      <section class="panel" hidden>
         <p class="meta">[ DOM SCAN ]</p>
         <p class="hint compact">Debug: copy editor DOM for Cursor.</p>
         <div class="actions">
@@ -75,7 +80,7 @@
       </section>
 
       <footer class="foot">
-        <span class="meta">v0.18.59</span>
+        <span class="meta">v0.18.61</span>
       </footer>
     </main>
     <script src="layout-ops.js"></script>

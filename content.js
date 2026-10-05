@@ -1,5 +1,5 @@
 (() => {
-  const VERSION = "0.18.59";
+  const VERSION = "0.18.61";
   const STORAGE_KEY = "preferredCameras";
   const LAYOUT_KEY = "preferredMosaicLayout";
   const PREFERRED_ACTIVE_TILE = "cam_high";
@@ -1613,7 +1613,8 @@
 
       chrome.storage.local.get(["autoLayoutEnabled", "preferredMosaicLayout"], (stored) => {
         if (chrome.runtime.lastError) return;
-        if (stored.autoLayoutEnabled !== true) return;
+        // Default on when unset
+        if (stored.autoLayoutEnabled === false) return;
         if (!stored.preferredMosaicLayout?.tree) return;
         if (autoLayoutDoneKey === key || autoLayoutInFlight) return;
 
@@ -1671,7 +1672,10 @@
       if (changes.savedDefaultLeaves || changes.preferredMosaicLayout) {
         scheduleEpisodeWatch();
       }
-      if (changes.autoLayoutEnabled?.newValue === true) {
+      if (
+        changes.autoLayoutEnabled &&
+        changes.autoLayoutEnabled.newValue !== false
+      ) {
         autoLayoutDoneKey = "";
         scheduleAutoLayout();
       }

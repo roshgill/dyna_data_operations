@@ -55,6 +55,11 @@ main {
   gap: 10px;
 }
 
+/* Author display:grid overrides the UA [hidden] rule — keep hide working */
+.panel[hidden] {
+  display: none;
+}
+
 .panel:first-of-type {
   border-top: none;
   padding-top: 0;
@@ -89,6 +94,16 @@ h1 {
   color: var(--muted);
   font-size: 13px;
   line-height: 1.5;
+}
+
+.hint.warn {
+  color: #6b4a12;
+  font-weight: 500;
+}
+
+.hint.warn .warn-mark {
+  margin-right: 0.35em;
+  font-weight: 700;
 }
 
 .actions {
