@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Dyna Ops: Encord Automations",
-  "version": "0.18.48",
+  "version": "0.18.59",
   "description": "Encord camera layout restore and incomplete Grade/Step annotation automations.",
   "permissions": ["storage", "activeTab", "scripting", "contextMenus"],
   "host_permissions": [
@@ -32,7 +32,7 @@
         "https://app.encord.com/*",
         "https://app.us.encord.com/*"
       ],
-      "js": ["content.js", "trajectory-sync.js"],
+      "js": ["content.js", "trajectory-sync.js", "auto-scroll-next-step.js"],
       "run_at": "document_idle"
     }
   ],

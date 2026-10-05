@@ -2,7 +2,7 @@
 // Write path: Encord classification UI (frame jump + C/V/M or Range start/end inputs).
 // No timeline draw-drag / alt-click / shift-click (those create single-frame pins).
 (() => {
-  const VERSION = "0.18.48-grade";
+  const VERSION = "0.18.59-grade";
   const STORAGE_ENABLED = "autoGradeEnabled";
   // v2 key — invalidates bad caches that stored lastStepNum=2 from truncated scrapes
   const STORAGE_DEFINED_STEPS = "gradeSyncDefinedStepsV2";
