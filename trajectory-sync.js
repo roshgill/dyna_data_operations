@@ -2,7 +2,7 @@
 // Write path: Encord classification UI (frame jump + C/V/M or Range start/end inputs).
 // No timeline draw-drag / alt-click / shift-click (those create single-frame pins).
 (() => {
-  const VERSION = "0.18.59-grade";
+  const VERSION = "0.18.61-grade";
   const STORAGE_ENABLED = "autoGradeEnabled";
   // v2 key — invalidates bad caches that stored lastStepNum=2 from truncated scrapes
   const STORAGE_DEFINED_STEPS = "gradeSyncDefinedStepsV2";
@@ -3826,9 +3826,9 @@
     try {
       const stored = await chrome.storage.local.get(STORAGE_ENABLED);
       if (typeof stored[STORAGE_ENABLED] === "boolean") enabled = stored[STORAGE_ENABLED];
-      else enabled = true; // on by default — one-shot annotation after Esc/Done
+      else enabled = false; // off by default — opt in via popup
     } catch {
-      enabled = true;
+      enabled = false;
     }
   }
 
@@ -3905,7 +3905,7 @@
 
     chrome.storage.onChanged.addListener((changes, area) => {
       if (area !== "local" || !changes[STORAGE_ENABLED]) return;
-      enabled = changes[STORAGE_ENABLED].newValue !== false;
+      enabled = changes[STORAGE_ENABLED].newValue === true;
     });
   }
 
@@ -3931,7 +3931,7 @@
       return true;
     }
     if (message?.type === "GRADE_SYNC_SET_ENABLED") {
-      enabled = message.enabled !== false;
+      enabled = message.enabled === true;
       chrome.storage.local.set({ [STORAGE_ENABLED]: enabled }).then(() => {
         sendResponse({ ok: true, enabled });
         // Do not sync on toggle — wait for Esc/Done after last defined Step

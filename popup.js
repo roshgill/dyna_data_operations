@@ -62,7 +62,7 @@ async function refreshAutoLayoutToggle() {
   try {
     autoLayoutEl.checked = await LayoutOps.getAutoLayoutEnabled();
   } catch {
-    autoLayoutEl.checked = false;
+    autoLayoutEl.checked = true;
   }
 }
 
@@ -81,7 +81,7 @@ async function refreshGradeStatus() {
       gradeStatusEl.textContent = result?.error || "Open an Encord episode to see Grade status.";
       return;
     }
-    autoGradeEl.checked = result.enabled !== false;
+    autoGradeEl.checked = result.enabled === true;
     const defined = result.definedSteps || result.snapshot?.definedSteps;
     const snap = result.snapshot;
     if (!snap?.ready) {

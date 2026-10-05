@@ -453,7 +453,8 @@ const LayoutOps = (() => {
 
   async function getAutoLayoutEnabled() {
     const stored = await chrome.storage.local.get("autoLayoutEnabled");
-    return stored.autoLayoutEnabled === true;
+    // Default on when unset
+    return stored.autoLayoutEnabled !== false;
   }
 
   async function setAutoLayoutEnabled(enabled) {
