@@ -47,6 +47,17 @@
         </div>
       </section>
 
+      <section class="panel">
+        <p class="meta">[ DOM SCAN ]</p>
+        <p class="hint compact">Debug: copy editor DOM for Cursor.</p>
+        <div class="actions">
+          <button id="scan-full" type="button">Scan full episode DOM</button>
+          <button id="scan" type="button">Scan timeline only</button>
+          <button id="copy-scan" type="button" disabled>Copy scan result</button>
+        </div>
+        <textarea id="scan-out" class="scan-out" readonly rows="8" placeholder="Scan result appears here…"></textarea>
+      </section>
+
       <section class="feedback">
         <p id="status" class="status" aria-live="polite"></p>
       </section>

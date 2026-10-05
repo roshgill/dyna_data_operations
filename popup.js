@@ -1,6 +1,10 @@
 const statusEl = document.getElementById("status");
 const saveBtn = document.getElementById("save");
 const restoreBtn = document.getElementById("restore");
+const scanBtn = document.getElementById("scan");
+const scanFullBtn = document.getElementById("scan-full");
+const copyScanBtn = document.getElementById("copy-scan");
+const scanOut = document.getElementById("scan-out");
 const autoLayoutEl = document.getElementById("auto-layout");
 const autoGradeEl = document.getElementById("auto-grade");
 const gradeStatusEl = document.getElementById("grade-status");
@@ -30,6 +34,8 @@ function setStatus(message) {
 function setBusy(busy) {
   saveBtn.disabled = busy;
   restoreBtn.disabled = busy;
+  scanBtn.disabled = busy;
+  scanFullBtn.disabled = busy;
   gradeSyncBtn.disabled = busy;
 }
 
@@ -182,6 +188,45 @@ gradeSyncBtn.addEventListener("click", async () => {
     setStatus(err.message || String(err));
   } finally {
     setBusy(false);
+  }
+});
+
+async function runScan(kind) {
+  setBusy(true);
+  setStatus(kind === "full" ? "Scanning full episode DOM…" : "Scanning timeline…");
+  copyScanBtn.disabled = true;
+  try {
+    const tab = await resolveTargetTab();
+    const result =
+      kind === "full" ? await LayoutOps.scanFullDom(tab) : await LayoutOps.scanTimeline(tab);
+    scanOut.value = result.report || JSON.stringify(result, null, 2);
+    copyScanBtn.disabled = !scanOut.value;
+    const s = result.summary || {};
+    if (kind === "full") {
+      const kb = Math.round((s.chars || scanOut.value.length) / 1024);
+      setStatus(`Full DOM ready (~${kb} KB). Copy and paste to Cursor.`);
+    } else {
+      setStatus("Timeline scan ready. Copy and paste to Cursor.");
+    }
+  } catch (err) {
+    scanOut.value = "";
+    setStatus(err.message || String(err));
+  } finally {
+    setBusy(false);
+  }
+}
+
+scanFullBtn.addEventListener("click", () => runScan("full"));
+scanBtn.addEventListener("click", () => runScan("timeline"));
+
+copyScanBtn.addEventListener("click", async () => {
+  try {
+    await navigator.clipboard.writeText(scanOut.value);
+    setStatus("Copied scan result.");
+  } catch {
+    scanOut.focus();
+    scanOut.select();
+    setStatus("Copy failed — select the text and copy manually.");
   }
 });
 

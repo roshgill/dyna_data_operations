@@ -57,10 +57,18 @@ const LayoutOps = (() => {
         needInject = true;
       }
     }
+    if (!needInject) {
+      try {
+        const scroll = await chrome.tabs.sendMessage(tabId, { type: "AUTO_SCROLL_STATUS" });
+        if (!scroll?.ok) needInject = true;
+      } catch {
+        needInject = true;
+      }
+    }
     if (needInject) {
       await chrome.scripting.executeScript({
         target: { tabId },
-        files: ["content.js", "trajectory-sync.js"],
+        files: ["content.js", "trajectory-sync.js", "auto-scroll-next-step.js"],
       });
     }
   }
