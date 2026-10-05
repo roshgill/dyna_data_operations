@@ -2,7 +2,7 @@
 // 1) New blank (unannotated) Step placed on timeline → scroll list to next Step (maxDefined+1)
 // 2) A Step is selected (Step Outcome open) → center that Step + Outcome block
 (() => {
-  const VERSION = "0.18.57-scroll";
+  const VERSION = "0.18.58-scroll";
   /** Don't scroll-to-next for Step 1 — only once next target is Step 2+. */
   const MIN_TARGET_STEP = 2;
   const CENTER_TOL_PX = 40;
@@ -285,21 +285,27 @@
 
   /**
    * Center `el`'s bounding box in the nearest real scrollport.
-   * For mode selected: pass the whole Step treeitem (header + Outcome).
-   * For mode next-list: pass the Step header only.
+   * For mode selected: pass the whole Step treeitem (header + Outcome), optionally smooth.
+   * For mode next-list: pass the Step header only (instant).
+   * @param {Element} el
+   * @param {string} label
+   * @param {{ smooth?: boolean }} [opts]
    */
-  function centerInScrollport(el, label) {
+  function centerInScrollport(el, label, opts = {}) {
+    const smooth = !!opts.smooth;
+    const behavior = smooth ? "smooth" : "auto";
+
     if (!el) {
       warn("center: no element", label);
       return { ok: false, reason: "no-element" };
     }
 
     const ports = listScrollableAncestors(el);
-    log("center: ports", label, ports.map(describePort));
+    log("center: ports", label, { smooth }, ports.map(describePort));
 
     if (!ports.length) {
       try {
-        el.scrollIntoView({ block: "center", inline: "nearest", behavior: "auto" });
+        el.scrollIntoView({ block: "center", inline: "nearest", behavior });
       } catch {
         try {
           el.scrollIntoView(true);
@@ -329,6 +335,7 @@
 
       log("center: try", label, {
         ...describePort(port),
+        smooth,
         delta: Math.round(delta),
         elH: Math.round(er.height),
         prev,
@@ -336,10 +343,19 @@
       });
 
       if (Math.abs(next - prev) >= 1) {
+        const prevBehavior = port.style.scrollBehavior;
+        if (smooth) port.style.scrollBehavior = "smooth";
         port.scrollTop = next;
+        if (smooth) {
+          // Restore after the smooth animation window so later instant scrolls stay snappy
+          setTimeout(() => {
+            port.style.scrollBehavior = prevBehavior;
+          }, 400);
+        }
         const after = port.scrollTop;
         log("center: applied", prev, "→", after);
-        if (Math.abs(after - prev) >= 1) {
+        // Smooth scroll may report scrollTop unchanged until the animation runs
+        if (smooth || Math.abs(after - prev) >= 1) {
           moved = true;
           primary = port;
         } else {
@@ -353,15 +369,17 @@
 
     if (!moved) {
       try {
-        el.scrollIntoView({ block: "center", inline: "nearest", behavior: "auto" });
-        log("center: scrollIntoView fallback", label);
+        el.scrollIntoView({ block: "center", inline: "nearest", behavior });
+        log("center: scrollIntoView fallback", label, { smooth });
+        moved = true;
       } catch {
         /* ignore */
       }
     }
 
     const rect = el.getBoundingClientRect();
-    const visible = ports.some((p) => isRectCentered(rect, p));
+    // During smooth scroll, mid-point may not match yet — treat moved as success
+    const visible = smooth ? moved : ports.some((p) => isRectCentered(rect, p));
     return {
       ok: moved || visible,
       moved,
@@ -494,8 +512,10 @@
         }
       }
 
-      log("runScroll: selected → center Step", ctx.stepNum, "+ outcome block");
-      const result = centerInScrollport(ctx.block, `selected-Step-${ctx.stepNum}`);
+      log("runScroll: selected → center Step", ctx.stepNum, "+ outcome block (smooth)");
+      const result = centerInScrollport(ctx.block, `selected-Step-${ctx.stepNum}`, {
+        smooth: true,
+      });
       if (!result.ok && attempt < RETRY_MAX) {
         clearTimeout(retryTimer);
         retryTimer = setTimeout(
