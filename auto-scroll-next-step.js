@@ -2,9 +2,9 @@
 // 1) New blank (unannotated) Step placed on timeline → scroll list to next Step (maxDefined+1)
 // 2) A Step is selected (Step Outcome open) → center that Step + Outcome block
 (() => {
-  const VERSION = "0.18.63-scroll";
+  const VERSION = "0.18.62-scroll";
   const STORAGE_ENABLED = "autoScrollEnabled";
-  /** Don't scroll-to-next for Step 1 — only once next target is Step 2+. */
+  /** Don't scroll-to-next for Step 1 on the first cycle — only once a Step is already labeled. */
   const MIN_TARGET_STEP = 2;
   const CENTER_TOL_PX = 40;
   const DEBOUNCE_MS = 140;
@@ -212,6 +212,26 @@
       if (re.test(text)) return item;
     }
     return null;
+  }
+
+  /** Lowest numbered Step treeitem in the ontology list (usually Step 1). */
+  function findFirstStepTreeitem() {
+    const root = leftPanelRoot();
+    if (!root) return null;
+    let best = null;
+    let bestNum = Infinity;
+    for (const item of root.querySelectorAll('[role="treeitem"]')) {
+      const title =
+        item.querySelector(".ant-tree-title") ||
+        item.querySelector("label") ||
+        item;
+      const n = parseStepNumber(title.textContent || "");
+      if (n != null && n < bestNum) {
+        bestNum = n;
+        best = item;
+      }
+    }
+    return best ? { stepNum: bestNum, treeitem: best } : null;
   }
 
   function stepHeaderEl(treeitem) {
@@ -446,13 +466,28 @@
 
     // Mode 1 — scroll list to next Step after a new timeline annotation is placed
     if (mode === "next-list") {
-      const targetNum = stats.maxDefined + 1;
-      if (targetNum < MIN_TARGET_STEP) {
+      let targetNum = stats.maxDefined + 1;
+      let wrapped = false;
+      // First cycle only: don't auto-scroll to Step 1 before any Step is labeled
+      if (stats.maxDefined < 1 && targetNum < MIN_TARGET_STEP) {
         log("runScroll: next-list before Step 2", { targetNum, stats });
         pendingAnnotationPlace = false;
         return { ok: true, skipped: true, reason: "before-step-2", targetNum };
       }
-      const item = findStepTreeitem(targetNum);
+
+      let item = findStepTreeitem(targetNum);
+      // Cycle wrap: after last ontology Step (e.g. 5), show Step 1 again
+      if (!item && stats.maxDefined >= 1) {
+        const first = findFirstStepTreeitem();
+        if (first) {
+          item = first.treeitem;
+          targetNum = first.stepNum;
+          wrapped = true;
+          log("runScroll: next-list wrap → Step", targetNum, {
+            maxDefined: stats.maxDefined,
+          });
+        }
+      }
       if (!item) {
         if (attempt < RETRY_MAX) {
           clearTimeout(retryTimer);
@@ -466,14 +501,14 @@
         return { ok: false, reason: "treeitem-missing", targetNum };
       }
 
-      const key = `next:${targetNum}:t${stats.total}:b${stats.blank}`;
+      const key = `next:${targetNum}:t${stats.total}:b${stats.blank}:w${wrapped ? 1 : 0}`;
       const anchor = stepHeaderEl(item);
       if (!opts.force && lastScrollKey === key && lastAppliedScrollTop != null) {
         const ports = listScrollableAncestors(anchor || item);
         if (ports.some((p) => isRectCentered((anchor || item).getBoundingClientRect(), p))) {
           log("runScroll: next-list skip — already centered", key);
           pendingAnnotationPlace = false;
-          return { ok: true, skipped: true, mode, targetNum };
+          return { ok: true, skipped: true, mode, targetNum, wrapped };
         }
       }
 
@@ -482,6 +517,7 @@
         blank: stats.blank,
         total: stats.total,
         maxDefined: stats.maxDefined,
+        wrapped,
       });
       const result = centerInScrollport(anchor || item, `next-Step-${targetNum}`);
       if (!result.ok && attempt < RETRY_MAX) {
@@ -501,7 +537,7 @@
         pendingAnnotationPlace = false;
       }
       log("runScroll: next-list done", result);
-      return { ok: result.ok, mode, targetNum, ...result };
+      return { ok: result.ok, mode, targetNum, wrapped, ...result };
     }
 
     // Mode 2 — center selected Step + Outcome block
@@ -834,6 +870,7 @@
     timelineStepStats,
     findSelectedStepContext,
     findStepTreeitem,
+    findFirstStepTreeitem,
     stepsPanelOpen,
     get enabled() {
       return enabled;
