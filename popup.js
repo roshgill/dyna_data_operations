@@ -9,7 +9,6 @@ const autoLayoutEl = document.getElementById("auto-layout");
 const autoScrollEl = document.getElementById("auto-scroll");
 const autoGradeEl = document.getElementById("auto-grade");
 const gradeStatusEl = document.getElementById("grade-status");
-const gradeSyncBtn = document.getElementById("grade-sync");
 
 const openerTabId = Number(new URLSearchParams(location.search).get("tabId") || "");
 
@@ -37,7 +36,6 @@ function setBusy(busy) {
   restoreBtn.disabled = busy;
   scanBtn.disabled = busy;
   scanFullBtn.disabled = busy;
-  gradeSyncBtn.disabled = busy;
 }
 
 async function refreshStatus() {
@@ -177,35 +175,6 @@ autoGradeEl.addEventListener("change", async () => {
     await refreshGradeStatus();
   } catch (err) {
     setStatus(err.message || String(err));
-  }
-});
-
-gradeSyncBtn.addEventListener("click", async () => {
-  setBusy(true);
-  setStatus("Focusing editor…");
-  try {
-    const tab = await resolveTargetTab();
-    // Background focuses the Encord tab first so Grade create isn't stuck on an unfocused page.
-    const result = await chrome.runtime.sendMessage({ type: "OPS_GRADE_SYNC_NOW", tab });
-    if (result?.ok) {
-      setStatus("Annotation complete");
-    } else if (
-      result?.reason === "waiting-for-last-defined-step" ||
-      result?.reason === "last-defined-step-not-on-timeline"
-    ) {
-      const n = result.wantStep ?? result.snap?.definedSteps?.lastStepNum;
-      setStatus(n != null ? `Waiting for Step ${n}` : "Waiting for Step list");
-    } else if (result?.reason === "no-defined-steps" || result?.reason === "no-last-step") {
-      setStatus("Waiting for Step list");
-    } else {
-      const why = result?.error || result?.reason || "Annotation skipped.";
-      setStatus(why);
-    }
-    await refreshGradeStatus();
-  } catch (err) {
-    setStatus(err.message || String(err));
-  } finally {
-    setBusy(false);
   }
 });
 

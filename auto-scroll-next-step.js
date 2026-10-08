@@ -2,7 +2,7 @@
 // 1) New blank (unannotated) Step placed on timeline → scroll list to next Step (maxDefined+1)
 // 2) A Step is selected (Step Outcome open) → center that Step + Outcome block
 (() => {
-  const VERSION = "0.18.61-scroll";
+  const VERSION = "0.18.63-scroll";
   const STORAGE_ENABLED = "autoScrollEnabled";
   /** Don't scroll-to-next for Step 1 — only once next target is Step 2+. */
   const MIN_TARGET_STEP = 2;
