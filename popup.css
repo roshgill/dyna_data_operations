@@ -48,11 +48,20 @@ main {
 }
 
 .panel {
-  margin-top: 18px;
+  position: relative;
+  margin-top: 28px;
   padding-top: 16px;
-  border-top: 1px dotted var(--border);
   display: grid;
   gap: 10px;
+}
+
+.panel::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  border-top: 1px dotted var(--border);
 }
 
 /* Author display:grid overrides the UA [hidden] rule — keep hide working */
@@ -61,8 +70,12 @@ main {
 }
 
 .panel:first-of-type {
-  border-top: none;
+  margin-top: 12px;
   padding-top: 0;
+}
+
+.panel:first-of-type::before {
+  content: none;
 }
 
 .auto-layout-row {

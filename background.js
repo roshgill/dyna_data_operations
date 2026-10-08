@@ -1,7 +1,6 @@
 importScripts("layout-ops.js");
 
 const MENU = {
-  GRADE_SYNC: "encord-grade-sync",
   SAVE: "encord-layout-save",
   DETAILS: "encord-layout-details",
   RESTORE: "encord-layout-restore",
@@ -9,11 +8,6 @@ const MENU = {
 
 function installContextMenus() {
   chrome.contextMenus.removeAll(() => {
-    chrome.contextMenus.create({
-      id: MENU.GRADE_SYNC,
-      title: "Annotate now",
-      contexts: ["action"],
-    });
     chrome.contextMenus.create({
       id: MENU.RESTORE,
       title: "Restore layout",
@@ -50,7 +44,7 @@ async function withErrorToast(tab, fn) {
 }
 
 const ACTION_TITLE =
-  "Dyna Ops: Encord Automations. Click to restore · Right click for Annotate now | save | details";
+  "Dyna Ops: Encord Automations. Click to restore · Right click for restore | save | details";
 
 chrome.runtime.onInstalled.addListener(() => {
   installContextMenus();
@@ -67,10 +61,6 @@ chrome.action.onClicked.addListener((tab) => {
 });
 
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
-  if (info.menuItemId === MENU.GRADE_SYNC) {
-    await withErrorToast(tab, () => LayoutOps.gradeSyncNow(tab));
-    return;
-  }
   if (info.menuItemId === MENU.RESTORE) {
     await withErrorToast(tab, () => LayoutOps.restore(tab));
     return;
