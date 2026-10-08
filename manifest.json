@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Dyna Ops: Encord Automations",
-  "version": "0.18.61",
+  "version": "0.18.62",
   "description": "Encord camera layout restore, steps scroll, and incomplete Grade/Step annotation automations.",
   "permissions": ["storage", "activeTab", "scripting", "contextMenus"],
   "host_permissions": [
