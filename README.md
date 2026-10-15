@@ -1,18 +1,21 @@
 Dyna Ops: Encord Automations
 
-Internal Chrome MV3 extension for Encord label editor. Automates repetitive work our operators have to do curating data for robot model training.
+Internal Chrome MV3 extension for Encord label editor. Automates repetitive operator work for robot model training.
 
-Currently saves up to ~70 hours/week for our team of 21.
+Currently saves ~70 hours/week for our team of 21.
 
 Design Choices:
-Built as a standalone application with it's own menu component promoting separation of [some word I'm forgetting]. 
+Built as an extension with its own UI, promoting separation of concerns.
 
-User layout & Encord DOM information are saved locally on Chrome cahce, keeping overall system architecture simple and secure. 
+Encord layout preferences and flags are saved locally on chrome.storage.local, keeping system architecture simple and scoped to the local profile.
 
-Encord mosaic layout tree is navigated to catpure current camera states including position, width, and height to restore later.
+Camera layout
+Encord mosaic layout tree is captured in the page's MAIN world (camera position, width, height) to be restored on new episodes. Guard when saved episode's default camera set doesn't match current one.
 
-Least most annotated step on cam_high timeline is registered continuously, and used to center step +1 on steps panel component.
+Steps scroll
+Detects new unlabeled range, and scrolls to the next step (maxDefined + 1) that requires annotation.
 
-Grade-step annotates labels through explicit drag, click. select actions on the timeline and label panels. Injection is not possible since React tree updates are directly affected by server-side changes, which this plug-in does not have access to.
+Grade-step annotate
+Drives labeling directly from Encord's UI (clicks, selection, inputs). The extension has no access to server-side label writes except through the same UI as the operator. Auto is off by default; must be manually turned on for corresponding projects.
 
-This product exemplifies taking what you can get and making the most out of it.
+This product exemplifies taking what you can get (editor DOM, Chrome extensions APIs) and extracting as much value as possible.
