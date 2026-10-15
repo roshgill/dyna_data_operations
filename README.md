@@ -1,3 +1,5 @@
-Dyna Ops: Encord Automations saves ~70 hours/week automating repetitive work our operators have to do curating data for robot model training.
+Dyna Ops: Encord Automations
 
-The chrome extension (MV3) works in Encord to extract and save user data and manipulate the DOM.
+Internal Chrome MV3 extension for Encord label editor. Automates repetitive work our operators have to do curating data for robot model training.
+
+Currently saving up to ~70 hours/week for team of 21.
