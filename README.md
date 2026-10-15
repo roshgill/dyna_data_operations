@@ -4,6 +4,13 @@ Internal Chrome MV3 extension for Encord label editor. Automates repetitive oper
 
 Currently saves ~70 hours/week for our team of 21.
 
+Architecture:
+background.js comprises actions clicks, context menu, and message routing
+
+lay-out-ops.js shared control panel running save/restore/ toggle logic
+
+content.js in page camera-layout script. Discovers and manipulates mosaic tiles
+
 Design Choices:
 Built as an extension with its own UI, promoting separation of concerns.
 
