@@ -2,7 +2,7 @@
 
 Internal Chrome MV3 extension for Encord label editor. Automates repetitive operator work for robot model training.
 
-Currently saves ~70 hours/week for our team of 21.
+Currently saves ~70 hours/week for our team of 17.
 
 ## Architecture
 
