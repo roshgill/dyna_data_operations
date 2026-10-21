@@ -2,7 +2,7 @@
 // 1) New blank (unannotated) Step placed on timeline → scroll list to next Step (maxDefined+1)
 // 2) A Step is selected (Step Outcome open) → center that Step + Outcome block
 (() => {
-  const VERSION = "0.18.62-scroll";
+  const VERSION = "0.18.64-scroll";
   const STORAGE_ENABLED = "autoScrollEnabled";
   /** Don't scroll-to-next for Step 1 on the first cycle — only once a Step is already labeled. */
   const MIN_TARGET_STEP = 2;
@@ -34,7 +34,7 @@
   }
   log("booting", VERSION, "prev=", window.__encordAutoScrollNextStep?.version || null);
 
-  let enabled = true;
+  let enabled = false;
   let debounceTimer = null;
   let retryTimer = null;
   /** @type {string | null} last mode+target key we successfully scrolled */
@@ -57,9 +57,9 @@
     try {
       const stored = await chrome.storage.local.get(STORAGE_ENABLED);
       if (typeof stored[STORAGE_ENABLED] === "boolean") enabled = stored[STORAGE_ENABLED];
-      else enabled = true;
+      else enabled = false; // off by default — opt in via popup
     } catch {
-      enabled = true;
+      enabled = false;
     }
     log("enabled=", enabled);
   }
@@ -850,7 +850,7 @@
       return false;
     }
     if (message?.type === "AUTO_SCROLL_SET_ENABLED") {
-      enabled = message.enabled !== false;
+      enabled = message.enabled === true;
       log("AUTO_SCROLL_SET_ENABLED", enabled);
       sendResponse({ ok: true, enabled });
       return false;
@@ -860,7 +860,7 @@
 
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== "local" || !changes[STORAGE_ENABLED]) return;
-    enabled = changes[STORAGE_ENABLED].newValue !== false;
+    enabled = changes[STORAGE_ENABLED].newValue === true;
     log("storage enabled →", enabled);
   });
 
