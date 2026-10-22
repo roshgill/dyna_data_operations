@@ -68,7 +68,7 @@ async function refreshAutoScrollToggle() {
   try {
     autoScrollEl.checked = await LayoutOps.getAutoScrollEnabled();
   } catch {
-    autoScrollEl.checked = true;
+    autoScrollEl.checked = false;
   }
 }
 

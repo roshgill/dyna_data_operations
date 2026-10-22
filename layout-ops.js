@@ -464,8 +464,8 @@ const LayoutOps = (() => {
 
   async function getAutoScrollEnabled() {
     const stored = await chrome.storage.local.get("autoScrollEnabled");
-    // Default on when unset (matches prior always-on behavior)
-    return stored.autoScrollEnabled !== false;
+    // Default off when unset — opt in via popup for projects that need it
+    return stored.autoScrollEnabled === true;
   }
 
   async function setAutoScrollEnabled(tab, enabled) {
