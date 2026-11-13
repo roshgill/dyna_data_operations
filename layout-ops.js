@@ -68,7 +68,7 @@ const LayoutOps = (() => {
     if (needInject) {
       await chrome.scripting.executeScript({
         target: { tabId },
-        files: ["content.js", "trajectory-sync.js", "auto-scroll-next-step.js"],
+        files: ["content.js", "trajectory-sync.js", "auto-scroll-next-step.js", "skip-reason-chips.js"],
       });
     }
   }
