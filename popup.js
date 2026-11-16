@@ -7,6 +7,7 @@ const copyScanBtn = document.getElementById("copy-scan");
 const scanOut = document.getElementById("scan-out");
 const autoLayoutEl = document.getElementById("auto-layout");
 const autoScrollEl = document.getElementById("auto-scroll");
+const errorChipsEl = document.getElementById("error-chips");
 const autoGradeEl = document.getElementById("auto-grade");
 const gradeStatusEl = document.getElementById("grade-status");
 
@@ -69,6 +70,14 @@ async function refreshAutoScrollToggle() {
     autoScrollEl.checked = await LayoutOps.getAutoScrollEnabled();
   } catch {
     autoScrollEl.checked = false;
+  }
+}
+
+async function refreshErrorChipsToggle() {
+  try {
+    errorChipsEl.checked = await LayoutOps.getErrorChipsEnabled();
+  } catch {
+    errorChipsEl.checked = true;
   }
 }
 
@@ -168,6 +177,15 @@ autoScrollEl.addEventListener("change", async () => {
   }
 });
 
+errorChipsEl.addEventListener("change", async () => {
+  try {
+    await LayoutOps.setErrorChipsEnabled(await resolveTargetTab(), errorChipsEl.checked);
+    setStatus(errorChipsEl.checked ? "Reason chips on." : "Reason chips off.");
+  } catch (err) {
+    setStatus(err.message || String(err));
+  }
+});
+
 autoGradeEl.addEventListener("change", async () => {
   try {
     await LayoutOps.setGradeEnabled(await resolveTargetTab(), autoGradeEl.checked);
@@ -220,4 +238,5 @@ copyScanBtn.addEventListener("click", async () => {
 refreshStatus();
 refreshAutoLayoutToggle();
 refreshAutoScrollToggle();
+refreshErrorChipsToggle();
 refreshGradeStatus();

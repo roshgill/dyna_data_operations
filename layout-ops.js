@@ -484,6 +484,28 @@ const LayoutOps = (() => {
     return { ok: true, enabled: !!enabled };
   }
 
+  async function getErrorChipsEnabled() {
+    const stored = await chrome.storage.local.get("skipReasonChipsEnabled");
+    // Default on when unset
+    return stored.skipReasonChipsEnabled !== false;
+  }
+
+  async function setErrorChipsEnabled(tab, enabled) {
+    await chrome.storage.local.set({ skipReasonChipsEnabled: !!enabled });
+    try {
+      const active = tab ? await requireEncordTab(tab) : await getActiveTab();
+      if (active?.id && isEncordUrl(active.url)) {
+        await chrome.tabs.sendMessage(active.id, {
+          type: "SKIP_CHIPS_SET_ENABLED",
+          enabled: !!enabled,
+        });
+      }
+    } catch {
+      /* content may reload */
+    }
+    return { ok: true, enabled: !!enabled };
+  }
+
   /** Restore saved layout if auto-layout is on (used after episode render). */
   async function tryAutoLayout(tab) {
     const enabled = await getAutoLayoutEnabled();
@@ -512,6 +534,8 @@ const LayoutOps = (() => {
     setAutoLayoutEnabled,
     getAutoScrollEnabled,
     setAutoScrollEnabled,
+    getErrorChipsEnabled,
+    setErrorChipsEnabled,
     tryAutoLayout,
     checkMismatch,
     lockEpisodeDefault,
