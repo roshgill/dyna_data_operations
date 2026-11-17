@@ -1,5 +1,5 @@
 (() => {
-  const VERSION = "0.18.72";
+  const VERSION = "0.18.76";
   const STORAGE_KEY = "preferredCameras";
   const LAYOUT_KEY = "preferredMosaicLayout";
   const PREFERRED_ACTIVE_TILE = "cam_high";
@@ -549,6 +549,9 @@
       : { ok: false, tileId: PREFERRED_ACTIVE_TILE, error: waited.error, waited };
     if (selectResult.ok) {
       message += ` · selected ${selectResult.tileId}`;
+      // Once per instantiation: after cam_high, park playhead at 0; then leave it alone.
+      const seek = await seekPlayheadToZeroAfterCamHigh();
+      if (seek?.ok && !seek?.skipped) message += " · playhead → 0";
     } else {
       message += ` · ${PREFERRED_ACTIVE_TILE} not ready`;
     }
@@ -1577,8 +1580,12 @@
   // Capture episode default early; warn only when that default differs from last saved default.
   let mismatchTimer = null;
   let autoLayoutTimer = null;
+  let seekZeroTimer = null;
   let autoLayoutDoneKey = "";
+  /** Once per editor instantiation (cleared on href remount), after cam_high. */
+  let seekZeroDone = false;
   let autoLayoutInFlight = false;
+  let seekZeroInFlight = false;
 
   function episodeLayoutKey() {
     try {
@@ -1592,6 +1599,130 @@
     const tiles = document.querySelectorAll('[data-testid="tile-display-name"]').length;
     const windows = document.querySelectorAll(".mosaic-window").length;
     return tiles >= 1 && windows >= 1;
+  }
+
+  function readPlayheadFrame() {
+    const el = document.querySelector('[data-testid="currentFrame"]');
+    const n = Number(String(el?.textContent || "").replace(/[^\d]/g, ""));
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function frameNavReady() {
+    return Boolean(
+      document.querySelector('[data-testid="content-navigation-frame-input"]') &&
+        document.querySelector('[data-testid="totalFrames"]')
+    );
+  }
+
+  /** Jump playhead to 0 via page-world React path (same bridge as grade sync). */
+  function pageGotoFrameZero() {
+    return new Promise((resolve) => {
+      const id = `seek-zero-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+      const onMsg = (event) => {
+        if (event.source !== window) return;
+        const data = event.data;
+        if (data?.source !== "encord-grade-sync" || data.type !== "GOTO_FRAME_RESULT" || data.id !== id) {
+          return;
+        }
+        window.removeEventListener("message", onMsg);
+        resolve(data.result || { ok: false });
+      };
+      window.addEventListener("message", onMsg);
+      window.postMessage({ source: "encord-grade-sync", type: "GOTO_FRAME", id, frame: 0 }, "*");
+      setTimeout(() => {
+        window.removeEventListener("message", onMsg);
+        resolve({ ok: false, error: "timeout" });
+      }, 1200);
+    });
+  }
+
+  function domGotoFrameZero() {
+    const input = document.querySelector('[data-testid="content-navigation-frame-input"]');
+    if (!(input instanceof HTMLInputElement)) return false;
+    try {
+      input.focus();
+      input.select?.();
+      const proto = window.HTMLInputElement.prototype;
+      const desc = Object.getOwnPropertyDescriptor(proto, "value");
+      if (desc?.set) desc.set.call(input, "0");
+      else input.value = "0";
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      input.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Enter", code: "Enter", keyCode: 13, bubbles: true })
+      );
+      input.blur();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * After cam_high is focused: seek playhead to 0 once for this instantiation.
+   * Never re-seeks if the user later scrubs away from 0.
+   */
+  async function seekPlayheadToZeroAfterCamHigh() {
+    if (seekZeroDone) return { ok: true, skipped: true, reason: "already" };
+    if (!frameNavReady()) {
+      for (let i = 0; i < 12 && !frameNavReady(); i += 1) {
+        await new Promise((r) => setTimeout(r, 100));
+      }
+    }
+    if (!frameNavReady()) return { ok: false, error: "no-frame-nav" };
+
+    const cur = readPlayheadFrame();
+    if (cur !== 0) {
+      await pageGotoFrameZero();
+      if (readPlayheadFrame() !== 0) {
+        domGotoFrameZero();
+        await new Promise((r) => setTimeout(r, 250));
+      }
+    }
+    seekZeroDone = true;
+    return { ok: true, frame: readPlayheadFrame() };
+  }
+
+  /**
+   * Fallback when auto-layout/restore won't select cam_high (layout off, no save, blocked).
+   * Selects cam_high then seeks once. No-ops if seek already done this instantiation.
+   */
+  async function runCamHighThenSeekFallback() {
+    if (seekZeroDone || seekZeroInFlight) return;
+    if (!mosaicLooksReady()) return;
+
+    const key = episodeLayoutKey();
+    const stored = await new Promise((resolve) => {
+      chrome.storage.local.get(["autoLayoutEnabled", "preferredMosaicLayout"], (value) => {
+        resolve(chrome.runtime.lastError ? {} : value || {});
+      });
+    });
+    const autoOn = stored.autoLayoutEnabled !== false;
+    const hasLayout = Boolean(stored.preferredMosaicLayout?.tree);
+    // Let restore own the first shot while auto-layout is still pending.
+    if (autoOn && hasLayout && autoLayoutDoneKey !== key) {
+      scheduleCamHighSeekFallback(1800);
+      return;
+    }
+
+    seekZeroInFlight = true;
+    try {
+      const waited = await waitForTileReady(PREFERRED_ACTIVE_TILE);
+      if (!waited.ok) return;
+      const selectResult = await selectTile(PREFERRED_ACTIVE_TILE);
+      if (!selectResult.ok) return;
+      await seekPlayheadToZeroAfterCamHigh();
+    } finally {
+      seekZeroInFlight = false;
+    }
+  }
+
+  function scheduleCamHighSeekFallback(delayMs = 1600) {
+    if (seekZeroDone) return;
+    clearTimeout(seekZeroTimer);
+    seekZeroTimer = setTimeout(() => {
+      runCamHighThenSeekFallback().catch(() => {});
+    }, delayMs);
   }
 
   function scheduleEpisodeWatch() {
@@ -1625,6 +1756,7 @@
             // Blocked (wrong camera set) = done. Layout ok but cam_high miss = allow retry.
             if (result?.blocked) {
               autoLayoutDoneKey = key;
+              scheduleCamHighSeekFallback(400);
               return;
             }
             if (result?.ok && result.selectResult && result.selectResult.ok === false) {
@@ -1632,7 +1764,14 @@
               setTimeout(() => scheduleAutoLayout(), 2500);
               return;
             }
-            if (result?.ok) autoLayoutDoneKey = key;
+            if (result?.ok) {
+              autoLayoutDoneKey = key;
+              // Restore seeks after cam_high; if that didn't land, fallback once.
+              if (!seekZeroDone) scheduleCamHighSeekFallback(400);
+            } else if (result?.skipped) {
+              autoLayoutDoneKey = key;
+              scheduleCamHighSeekFallback(400);
+            }
           })
           .catch(() => {})
           .finally(() => {
@@ -1649,14 +1788,17 @@
       if (location.href !== lastHref) {
         lastHref = location.href;
         autoLayoutDoneKey = "";
+        seekZeroDone = false;
         chrome.runtime.sendMessage({ type: "CLEAR_EPISODE_DEFAULT" }).catch(() => {});
         scheduleEpisodeWatch();
         scheduleAutoLayout();
+        scheduleCamHighSeekFallback();
       }
     }, 1000);
 
     let lastLeafHint = "";
     const mo = new MutationObserver(() => {
+      if (seekZeroDone) return;
       const hint = `${document.querySelectorAll(".mosaic-window").length}:${
         document.querySelectorAll('[data-testid="tile-display-name"]').length
       }`;
@@ -1664,6 +1806,7 @@
       lastLeafHint = hint;
       scheduleEpisodeWatch();
       scheduleAutoLayout();
+      scheduleCamHighSeekFallback();
     });
     mo.observe(document.documentElement, { childList: true, subtree: true });
 
@@ -1683,8 +1826,10 @@
 
     scheduleEpisodeWatch();
     scheduleAutoLayout();
+    scheduleCamHighSeekFallback();
     setTimeout(scheduleEpisodeWatch, 2000);
     setTimeout(scheduleAutoLayout, 2000);
+    setTimeout(() => scheduleCamHighSeekFallback(0), 2500);
     setTimeout(scheduleEpisodeWatch, 4500);
     setTimeout(scheduleAutoLayout, 4500);
     setTimeout(scheduleEpisodeWatch, 8000);
