@@ -2,7 +2,7 @@
 // 1) Under Skip task textarea → fill reason
 // 2) Under Metadata "Data title" → pathway + reason with copy
 (() => {
-  const VERSION = "0.18.72-skip-chips";
+  const VERSION = "0.18.76-skip-chips";
   const STORAGE_ENABLED = "skipReasonChipsEnabled";
   const SKIP_ROW_ID = "dyna-skip-reason-chips";
   const META_WRAP_ID = "dyna-meta-reason-wrap";
