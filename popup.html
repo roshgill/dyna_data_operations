@@ -35,14 +35,19 @@
 
       <section class="panel">
         <p class="meta">[ STEPS SCROLL ]</p>
-        <p class="hint">
-          Scrolls the Steps list to the next Step when you place a range.
-        </p>
+        <p class="hint">Helps you move through the Steps list while labeling or reviewing.</p>
         <label class="switch-row">
-          <input id="auto-scroll" type="checkbox" role="switch" />
+          <input id="scroll-center-step" type="checkbox" role="switch" checked />
           <span class="switch" aria-hidden="true"></span>
-          <span>Auto-scroll Steps panel</span>
+          <span>Center selected Step + Outcome</span>
         </label>
+        <p class="hint compact">*Centers the selected Step + Outcome</p>
+        <label class="switch-row">
+          <input id="scroll-next-step" type="checkbox" role="switch" />
+          <span class="switch" aria-hidden="true"></span>
+          <span>Suggest next Step to label</span>
+        </label>
+        <p class="hint compact">*Scrolls to the next step to label (recommended for annotation)</p>
       </section>
 
       <section class="panel">
@@ -89,7 +94,7 @@
       </section>
 
       <footer class="foot">
-        <span class="meta">v0.18.76</span>
+        <span class="meta">v0.18.86</span>
       </footer>
     </main>
     <script src="layout-ops.js"></script>

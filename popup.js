@@ -6,7 +6,8 @@ const scanFullBtn = document.getElementById("scan-full");
 const copyScanBtn = document.getElementById("copy-scan");
 const scanOut = document.getElementById("scan-out");
 const autoLayoutEl = document.getElementById("auto-layout");
-const autoScrollEl = document.getElementById("auto-scroll");
+const scrollNextStepEl = document.getElementById("scroll-next-step");
+const scrollCenterStepEl = document.getElementById("scroll-center-step");
 const errorChipsEl = document.getElementById("error-chips");
 const autoGradeEl = document.getElementById("auto-grade");
 const gradeStatusEl = document.getElementById("grade-status");
@@ -65,11 +66,16 @@ async function refreshAutoLayoutToggle() {
   }
 }
 
-async function refreshAutoScrollToggle() {
+async function refreshAutoScrollToggles() {
   try {
-    autoScrollEl.checked = await LayoutOps.getAutoScrollEnabled();
+    scrollNextStepEl.checked = await LayoutOps.getAutoScrollNextStepEnabled();
   } catch {
-    autoScrollEl.checked = false;
+    scrollNextStepEl.checked = false;
+  }
+  try {
+    scrollCenterStepEl.checked = await LayoutOps.getAutoScrollCenterStepEnabled();
+  } catch {
+    scrollCenterStepEl.checked = true;
   }
 }
 
@@ -168,10 +174,25 @@ autoLayoutEl.addEventListener("change", async () => {
   }
 });
 
-autoScrollEl.addEventListener("change", async () => {
+scrollNextStepEl.addEventListener("change", async () => {
   try {
-    await LayoutOps.setAutoScrollEnabled(await resolveTargetTab(), autoScrollEl.checked);
-    setStatus(autoScrollEl.checked ? "Auto scroll on." : "Auto scroll off.");
+    await LayoutOps.setAutoScrollNextStepEnabled(
+      await resolveTargetTab(),
+      scrollNextStepEl.checked
+    );
+    setStatus(scrollNextStepEl.checked ? "Next Step suggest on." : "Next Step suggest off.");
+  } catch (err) {
+    setStatus(err.message || String(err));
+  }
+});
+
+scrollCenterStepEl.addEventListener("change", async () => {
+  try {
+    await LayoutOps.setAutoScrollCenterStepEnabled(
+      await resolveTargetTab(),
+      scrollCenterStepEl.checked
+    );
+    setStatus(scrollCenterStepEl.checked ? "Step centering on." : "Step centering off.");
   } catch (err) {
     setStatus(err.message || String(err));
   }
@@ -237,6 +258,6 @@ copyScanBtn.addEventListener("click", async () => {
 
 refreshStatus();
 refreshAutoLayoutToggle();
-refreshAutoScrollToggle();
+refreshAutoScrollToggles();
 refreshErrorChipsToggle();
 refreshGradeStatus();

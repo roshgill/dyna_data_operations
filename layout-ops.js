@@ -462,20 +462,48 @@ const LayoutOps = (() => {
     return { ok: true, enabled: !!enabled };
   }
 
-  async function getAutoScrollEnabled() {
-    const stored = await chrome.storage.local.get("autoScrollEnabled");
-    // Default off when unset — opt in via popup for projects that need it
+  async function getAutoScrollNextStepEnabled() {
+    const stored = await chrome.storage.local.get([
+      "autoScrollNextStepEnabled",
+      "autoScrollEnabled",
+    ]);
+    if (typeof stored.autoScrollNextStepEnabled === "boolean") {
+      return stored.autoScrollNextStepEnabled === true;
+    }
+    // Migrate legacy single toggle → next-step only
     return stored.autoScrollEnabled === true;
   }
 
-  async function setAutoScrollEnabled(tab, enabled) {
-    await chrome.storage.local.set({ autoScrollEnabled: !!enabled });
+  async function getAutoScrollCenterStepEnabled() {
+    const stored = await chrome.storage.local.get("autoScrollCenterStepEnabled");
+    // Default on when unset
+    return stored.autoScrollCenterStepEnabled !== false;
+  }
+
+  async function setAutoScrollNextStepEnabled(tab, enabled) {
+    await chrome.storage.local.set({ autoScrollNextStepEnabled: !!enabled });
     try {
       const active = tab ? await requireEncordTab(tab) : await getActiveTab();
       if (active?.id && isEncordUrl(active.url)) {
         await chrome.tabs.sendMessage(active.id, {
           type: "AUTO_SCROLL_SET_ENABLED",
-          enabled: !!enabled,
+          nextStepEnabled: !!enabled,
+        });
+      }
+    } catch {
+      /* content may reload */
+    }
+    return { ok: true, enabled: !!enabled };
+  }
+
+  async function setAutoScrollCenterStepEnabled(tab, enabled) {
+    await chrome.storage.local.set({ autoScrollCenterStepEnabled: !!enabled });
+    try {
+      const active = tab ? await requireEncordTab(tab) : await getActiveTab();
+      if (active?.id && isEncordUrl(active.url)) {
+        await chrome.tabs.sendMessage(active.id, {
+          type: "AUTO_SCROLL_SET_ENABLED",
+          centerStepEnabled: !!enabled,
         });
       }
     } catch {
@@ -532,8 +560,10 @@ const LayoutOps = (() => {
     setGradeEnabled,
     getAutoLayoutEnabled,
     setAutoLayoutEnabled,
-    getAutoScrollEnabled,
-    setAutoScrollEnabled,
+    getAutoScrollNextStepEnabled,
+    setAutoScrollNextStepEnabled,
+    getAutoScrollCenterStepEnabled,
+    setAutoScrollCenterStepEnabled,
     getErrorChipsEnabled,
     setErrorChipsEnabled,
     tryAutoLayout,

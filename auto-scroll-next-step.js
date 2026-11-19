@@ -2,14 +2,18 @@
 // 1) New blank (unannotated) Step placed on timeline → scroll list to next Step (maxDefined+1)
 // 2) A Step is selected (Step Outcome open) → center that Step + Outcome block
 (() => {
-  const VERSION = "0.18.76-scroll";
-  const STORAGE_ENABLED = "autoScrollEnabled";
+  const VERSION = "0.18.86-scroll";
+  const STORAGE_NEXT = "autoScrollNextStepEnabled";
+  const STORAGE_CENTER = "autoScrollCenterStepEnabled";
+  const STORAGE_LEGACY = "autoScrollEnabled";
   /** Don't scroll-to-next for Step 1 on the first cycle — only once a Step is already labeled. */
   const MIN_TARGET_STEP = 2;
   const CENTER_TOL_PX = 40;
   const DEBOUNCE_MS = 140;
   const RETRY_MS = 80;
   const RETRY_MAX = 22;
+  /** Ignore scroll events from our own scrollTop writes. */
+  const PROGRAMMATIC_SCROLL_GRACE_MS = 600;
   const LOG = "[dyna-scroll]";
 
   function log(...args) {
@@ -34,7 +38,10 @@
   }
   log("booting", VERSION, "prev=", window.__encordAutoScrollNextStep?.version || null);
 
-  let enabled = false;
+  /** Suggest next Step to label — opt in (off by default). */
+  let nextStepEnabled = false;
+  /** Center selected Step + Outcome — on by default. */
+  let centerStepEnabled = true;
   let debounceTimer = null;
   let retryTimer = null;
   /** @type {string | null} last mode+target key we successfully scrolled */
@@ -52,16 +59,41 @@
   let stepRowObserver = null;
   /** @type {string | null} pending mode from schedule */
   let pendingMode = null;
+  /**
+   * When true, auto-scroll will not move the panel. Armed after any successful
+   * auto-scroll or trusted user wheel/scroll in the Steps list. Cleared only on
+   * a new blank range place or an explicit Step change (click / hotkey).
+   */
+  let scrollLock = false;
+  /** @type {number | null} Step that was centered when lock armed (for change detection). */
+  let lockedStepNum = null;
+  /** @type {'next-list'|'selected'|'user'|null} */
+  let lockSource = null;
+  let ignoreScrollUntil = 0;
+
+  function anyScrollEnabled() {
+    return nextStepEnabled || centerStepEnabled;
+  }
 
   async function loadEnabled() {
     try {
-      const stored = await chrome.storage.local.get(STORAGE_ENABLED);
-      if (typeof stored[STORAGE_ENABLED] === "boolean") enabled = stored[STORAGE_ENABLED];
-      else enabled = false; // off by default — opt in via popup
+      const stored = await chrome.storage.local.get([
+        STORAGE_NEXT,
+        STORAGE_CENTER,
+        STORAGE_LEGACY,
+      ]);
+      if (typeof stored[STORAGE_NEXT] === "boolean") {
+        nextStepEnabled = stored[STORAGE_NEXT] === true;
+      } else {
+        // Legacy single toggle mapped to next-step suggest
+        nextStepEnabled = stored[STORAGE_LEGACY] === true;
+      }
+      centerStepEnabled = stored[STORAGE_CENTER] !== false;
     } catch {
-      enabled = false;
+      nextStepEnabled = false;
+      centerStepEnabled = true;
     }
-    log("enabled=", enabled);
+    log("enabled next=", nextStepEnabled, "center=", centerStepEnabled);
   }
 
   function normalizeLabel(raw) {
@@ -422,6 +454,32 @@
     };
   }
 
+  function armScrollLock(stepNum, why) {
+    scrollLock = true;
+    lockedStepNum = stepNum != null && Number.isFinite(Number(stepNum)) ? Number(stepNum) : lockedStepNum;
+    if (String(why).startsWith("next-list")) lockSource = "next-list";
+    else if (String(why).startsWith("user")) lockSource = "user";
+    else lockSource = "selected";
+    clearTimeout(retryTimer);
+    retryTimer = null;
+    clearTimeout(debounceTimer);
+    debounceTimer = null;
+    log("scrollLock ON", why, "step", lockedStepNum, "source", lockSource);
+  }
+
+  function clearScrollLock(why) {
+    if (!scrollLock && lockedStepNum == null) return;
+    log("scrollLock OFF", why, "was", lockedStepNum, lockSource);
+    scrollLock = false;
+    lockedStepNum = null;
+    lockSource = null;
+  }
+
+  function eventInStepsPanel(target) {
+    const panel = leftPanelRoot();
+    return !!(panel && target && panel.contains(target));
+  }
+
   /**
    * @param {{ mode?: 'next-list'|'selected'|'auto', force?: boolean, attempt?: number }} [opts]
    */
@@ -430,8 +488,12 @@
     let mode = opts.mode || pendingMode || "auto";
     pendingMode = null;
 
-    if (!enabled && !opts.force) {
+    if (!anyScrollEnabled() && !opts.force) {
       return { ok: true, skipped: true, reason: "disabled" };
+    }
+    if (scrollLock) {
+      log("runScroll: locked — skip", mode);
+      return { ok: true, skipped: true, reason: "scroll-lock", mode };
     }
     if (!location.pathname.includes("/label_editor/")) {
       return { ok: false, reason: "not-editor" };
@@ -450,14 +512,24 @@
 
     const stats = timelineStepStats();
     const selected = findSelectedStepContext();
-    log("runScroll: state", { mode, stats, selected: selected?.stepNum ?? null, attempt });
+    log("runScroll: state", {
+      mode,
+      stats,
+      selected: selected?.stepNum ?? null,
+      attempt,
+      scrollLock,
+      lockedStepNum,
+      nextStepEnabled,
+      centerStepEnabled,
+    });
 
-    // Auto: selected+outcome wins; else next-list if a new annotation was just placed / blank exists
+    // Auto: pick an enabled mode only
     if (mode === "auto") {
-      if (selected?.outcome && !pendingAnnotationPlace) mode = "selected";
-      else if (pendingAnnotationPlace || stats.blank >= 1) mode = "next-list";
-      else if (selected?.outcome) mode = "selected";
-      else if (selected) mode = "selected";
+      if (centerStepEnabled && selected?.outcome && !pendingAnnotationPlace) mode = "selected";
+      else if (nextStepEnabled && (pendingAnnotationPlace || stats.blank >= 1)) mode = "next-list";
+      else if (centerStepEnabled && selected?.outcome) mode = "selected";
+      else if (centerStepEnabled && selected) mode = "selected";
+      else if (nextStepEnabled && (pendingAnnotationPlace || stats.blank >= 1)) mode = "next-list";
       else {
         log("runScroll: nothing to do");
         return { ok: true, skipped: true, reason: "idle" };
@@ -466,6 +538,9 @@
 
     // Mode 1 — scroll list to next Step after a new timeline annotation is placed
     if (mode === "next-list") {
+      if (!nextStepEnabled && !opts.force) {
+        return { ok: true, skipped: true, reason: "next-step-disabled" };
+      }
       let targetNum = stats.maxDefined + 1;
       let wrapped = false;
       // First cycle only: don't auto-scroll to Step 1 before any Step is labeled
@@ -508,6 +583,7 @@
         if (ports.some((p) => isRectCentered((anchor || item).getBoundingClientRect(), p))) {
           log("runScroll: next-list skip — already centered", key);
           pendingAnnotationPlace = false;
+          armScrollLock(targetNum, "next-list-already-centered");
           return { ok: true, skipped: true, mode, targetNum, wrapped };
         }
       }
@@ -519,6 +595,7 @@
         maxDefined: stats.maxDefined,
         wrapped,
       });
+      ignoreScrollUntil = Date.now() + PROGRAMMATIC_SCROLL_GRACE_MS;
       const result = centerInScrollport(anchor || item, `next-Step-${targetNum}`);
       if (!result.ok && attempt < RETRY_MAX) {
         clearTimeout(retryTimer);
@@ -535,6 +612,7 @@
         lastRangeTotal = stats.total;
         lastLabeledMax = stats.maxDefined;
         pendingAnnotationPlace = false;
+        armScrollLock(targetNum, "next-list");
       }
       log("runScroll: next-list done", result);
       return { ok: result.ok, mode, targetNum, wrapped, ...result };
@@ -542,6 +620,9 @@
 
     // Mode 2 — center selected Step + Outcome block
     if (mode === "selected") {
+      if (!centerStepEnabled && !opts.force) {
+        return { ok: true, skipped: true, reason: "center-step-disabled" };
+      }
       const ctx = selected || findSelectedStepContext();
       if (!ctx) {
         if (attempt < RETRY_MAX) {
@@ -560,11 +641,13 @@
         const ports = listScrollableAncestors(ctx.block);
         if (ports.some((p) => isRectCentered(ctx.block.getBoundingClientRect(), p))) {
           log("runScroll: selected skip — already centered", key);
+          armScrollLock(ctx.stepNum, "selected-already-centered");
           return { ok: true, skipped: true, mode, stepNum: ctx.stepNum };
         }
       }
 
       log("runScroll: selected → center Step", ctx.stepNum, "+ outcome block (smooth)");
+      ignoreScrollUntil = Date.now() + PROGRAMMATIC_SCROLL_GRACE_MS;
       const result = centerInScrollport(ctx.block, `selected-Step-${ctx.stepNum}`, {
         smooth: true,
       });
@@ -582,6 +665,7 @@
         lastBlankCount = stats.blank;
         lastRangeTotal = stats.total;
         lastLabeledMax = stats.maxDefined;
+        armScrollLock(ctx.stepNum, "selected");
       }
       log("runScroll: selected done", result);
       return { ok: result.ok, mode, stepNum: ctx.stepNum, ...result };
@@ -591,20 +675,35 @@
   }
 
   function scheduleScroll(reason, mode = "auto") {
-    if (!enabled) {
+    if (!anyScrollEnabled()) {
       log("scheduleScroll: skipped (disabled)", reason);
+      return;
+    }
+    if (mode === "next-list" && !nextStepEnabled) {
+      log("scheduleScroll: next-step off", reason);
+      return;
+    }
+    if (mode === "selected" && !centerStepEnabled) {
+      log("scheduleScroll: center-step off", reason);
+      return;
+    }
+    if (scrollLock) {
+      log("scheduleScroll: locked — skip", reason, mode);
       return;
     }
     log("scheduleScroll:", reason, mode, {
       pendingAnnotationPlace,
       lastRangeTotal,
       lastBlankCount,
+      scrollLock,
+      nextStepEnabled,
+      centerStepEnabled,
     });
     pendingMode = mode;
     clearTimeout(debounceTimer);
     debounceTimer = setTimeout(() => {
       try {
-        if (!enabled) return;
+        if (!anyScrollEnabled() || scrollLock) return;
         if (
           reason === "range-added" ||
           reason === "blank-placed" ||
@@ -635,6 +734,8 @@
     lastRangeTotal = stats.total;
     lastLabeledMax = stats.maxDefined;
     log("annotation placed:", via, stats);
+    if (!nextStepEnabled) return;
+    clearScrollLock("annotation-placed");
     scheduleScroll(via, "next-list");
   }
 
@@ -719,6 +820,14 @@
         if (hasOutcome && !wasOutcome) {
           log("panelObserver: Outcome opened for Step", selected.stepNum);
           pendingAnnotationPlace = false;
+          // After next-list, allow one Outcome center for that Step; otherwise stay locked.
+          if (
+            scrollLock &&
+            lockSource === "next-list" &&
+            lockedStepNum === selected.stepNum
+          ) {
+            clearScrollLock("outcome-after-next-list");
+          }
           scheduleScroll("step-selected", "selected");
         } else if (
           selected.stepNum !== wasSelectedNum &&
@@ -726,6 +835,9 @@
         ) {
           log("panelObserver: Step selected", selected.stepNum);
           pendingAnnotationPlace = false;
+          if (scrollLock && lockedStepNum !== selected.stepNum) {
+            clearScrollLock("panel-step-changed");
+          }
           scheduleScroll("step-selected", "selected");
         }
       }
@@ -743,17 +855,17 @@
   }
 
   function startWatch() {
-    log("startWatch", { enabled });
+    log("startWatch", { nextStepEnabled, centerStepEnabled });
     setTimeout(() => {
       if (!location.pathname.includes("/label_editor/")) return;
       ensureStepRowObserver();
       ensurePanelObserver();
-      if (!enabled) return;
+      if (!anyScrollEnabled()) return;
       const stats = timelineStepStats();
-      if (stats.blank >= 1 && stepsPanelOpen()) {
+      if (nextStepEnabled && stats.blank >= 1 && stepsPanelOpen()) {
         pendingAnnotationPlace = true;
         scheduleScroll("boot-blank", "next-list");
-      } else if (findSelectedStepContext()) {
+      } else if (centerStepEnabled && findSelectedStepContext()) {
         scheduleScroll("boot-selected", "selected");
       }
     }, 600);
@@ -783,6 +895,27 @@
       true
     );
 
+    // User took over the Steps list — stop auto-centering immediately.
+    document.addEventListener(
+      "wheel",
+      (event) => {
+        if (!event.isTrusted) return;
+        if (!eventInStepsPanel(event.target)) return;
+        armScrollLock(lockedStepNum, "user-wheel");
+      },
+      { capture: true, passive: true }
+    );
+    document.addEventListener(
+      "scroll",
+      (event) => {
+        if (!event.isTrusted) return;
+        if (Date.now() < ignoreScrollUntil) return;
+        if (!eventInStepsPanel(event.target)) return;
+        armScrollLock(lockedStepNum, "user-scroll");
+      },
+      { capture: true, passive: true }
+    );
+
     // Clicking a Step option in the left panel → mode selected
     document.addEventListener(
       "click",
@@ -801,6 +934,16 @@
         if (stepNum == null) return;
         log("trigger: panel step click", stepNum);
         pendingAnnotationPlace = false;
+        // Same Step while locked: only unlock if Outcome isn't open yet (one center).
+        if (scrollLock && lockedStepNum === stepNum) {
+          if (treeitemHasOutcome(treeitem)) {
+            log("trigger: same Step + Outcome while locked — leave scroll alone");
+            return;
+          }
+          clearScrollLock("step-click-await-outcome");
+        } else {
+          clearScrollLock("step-click");
+        }
         scheduleScroll("panel-step-click", "selected");
       },
       true
@@ -814,8 +957,18 @@
         if (!location.pathname.includes("/label_editor/")) return;
         if (!stepsPanelOpen()) return;
         if (pendingAnnotationPlace) {
+          clearScrollLock("key-pending-place");
           scheduleScroll("panel-key-pending-place", "next-list");
           return;
+        }
+        const selected = findSelectedStepContext();
+        if (scrollLock) {
+          // Only unlock when hotkey moved to a different Step.
+          if (!selected || selected.stepNum === lockedStepNum) {
+            log("trigger: key while locked — skip", lockedStepNum);
+            return;
+          }
+          clearScrollLock("step-key-changed");
         }
         scheduleScroll("panel-key", "auto");
       },
@@ -825,12 +978,13 @@
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message?.type === "AUTO_SCROLL_NEXT_STEP") {
-      if (!enabled) {
-        sendResponse({ ok: true, skipped: true, reason: "disabled" });
+      if (!nextStepEnabled) {
+        sendResponse({ ok: true, skipped: true, reason: "next-step-disabled" });
         return false;
       }
       lastScrollKey = null;
       lastAppliedScrollTop = null;
+      clearScrollLock("message-next-step");
       sendResponse(runScroll({ mode: "next-list", force: true }));
       return false;
     }
@@ -840,28 +994,55 @@
       sendResponse({
         ok: true,
         version: VERSION,
-        enabled,
+        nextStepEnabled,
+        centerStepEnabled,
+        enabled: anyScrollEnabled(),
         stats,
         selected: selected?.stepNum ?? null,
         lastScrollKey,
         lastAppliedScrollTop,
         panelOpen: stepsPanelOpen(),
+        scrollLock,
+        lockedStepNum,
       });
       return false;
     }
     if (message?.type === "AUTO_SCROLL_SET_ENABLED") {
-      enabled = message.enabled === true;
-      log("AUTO_SCROLL_SET_ENABLED", enabled);
-      sendResponse({ ok: true, enabled });
+      if (typeof message.nextStepEnabled === "boolean") {
+        nextStepEnabled = message.nextStepEnabled === true;
+      }
+      if (typeof message.centerStepEnabled === "boolean") {
+        centerStepEnabled = message.centerStepEnabled === true;
+      }
+      // Legacy payload
+      if (
+        typeof message.enabled === "boolean" &&
+        typeof message.nextStepEnabled !== "boolean" &&
+        typeof message.centerStepEnabled !== "boolean"
+      ) {
+        nextStepEnabled = message.enabled === true;
+      }
+      log("AUTO_SCROLL_SET_ENABLED", { nextStepEnabled, centerStepEnabled });
+      sendResponse({ ok: true, nextStepEnabled, centerStepEnabled });
       return false;
     }
     return false;
   });
 
   chrome.storage.onChanged.addListener((changes, area) => {
-    if (area !== "local" || !changes[STORAGE_ENABLED]) return;
-    enabled = changes[STORAGE_ENABLED].newValue === true;
-    log("storage enabled →", enabled);
+    if (area !== "local") return;
+    if (changes[STORAGE_NEXT]) {
+      nextStepEnabled = changes[STORAGE_NEXT].newValue === true;
+      log("storage next →", nextStepEnabled);
+    }
+    if (changes[STORAGE_CENTER]) {
+      centerStepEnabled = changes[STORAGE_CENTER].newValue !== false;
+      log("storage center →", centerStepEnabled);
+    }
+    if (changes[STORAGE_LEGACY] && typeof changes[STORAGE_NEXT] === "undefined") {
+      nextStepEnabled = changes[STORAGE_LEGACY].newValue === true;
+      log("storage legacy → next", nextStepEnabled);
+    }
   });
 
   window.__encordAutoScrollNextStep = {
@@ -873,7 +1054,16 @@
     findFirstStepTreeitem,
     stepsPanelOpen,
     get enabled() {
-      return enabled;
+      return anyScrollEnabled();
+    },
+    get nextStepEnabled() {
+      return nextStepEnabled;
+    },
+    get centerStepEnabled() {
+      return centerStepEnabled;
+    },
+    get scrollLock() {
+      return scrollLock;
     },
   };
 
